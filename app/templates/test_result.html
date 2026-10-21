@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}测试结果 · {{ user.name }}{% endblock %}
+{% block content %}
+
+<section class="page-head">
+  <div>
+    <h1>链路测试 · {{ user.name }}</h1>
+    <p class="muted">只读检查：登录、微应用授权、今日状态与打卡点。<strong>不会提交打卡。</strong></p>
+  </div>
+  <div class="head-actions">
+    <form method="post" action="/users/{{ user.id }}/test" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button class="btn btn-sm" type="submit">重新测试</button>
+    </form>
+    <a class="btn btn-sm btn-ghost" href="/users/{{ user.id }}/edit">编辑用户</a>
+    <a class="btn btn-sm btn-ghost" href="/">返回仪表盘</a>
+  </div>
+</section>
+
+{% if outcome.ok %}
+<div class="alert alert-ok">
+  <strong>链路正常。</strong>{{ outcome.message }}
+  {% if detail.login_used %}<span class="muted tiny">（本次使用了新的登录，已计入当天登录次数）</span>{% endif %}
+</div>
+{% else %}
+<div class="alert alert-error">
+  <strong>测试未通过。</strong>{{ outcome.message }}
+</div>
+{% endif %}
+
+<section class="result-grid">
+  <div class="result-card">
+    <div class="result-label">会话</div>
+    <div class="result-value">{{ '有效' if detail.session_valid else '未建立' }}</div>
+    <div class="muted tiny">{{ '复用了缓存会话' if detail.session_valid and not detail.login_used else ('本次重新登录' if detail.login_used else '—') }}</div>
+  </div>
+  <div class="result-card">
+    <div class="result-label">今日记录</div>
+    <div class="result-value mono">{{ detail.today.record_status_code if detail.today else '—' }}</div>
+    <div class="muted tiny">{{ detail.today.checkin_time if detail.today and detail.today.checkin_time else '尚无打卡时间' }}</div>
+  </div>
+  <div class="result-card">
+    <div class="result-label">打卡时段</div>
+    <div class="result-value">{{ detail.schedule.window if detail.schedule else '—' }}</div>
+    <div class="muted tiny">{{ detail.schedule.name if detail.schedule else '未读取到平台日程' }}</div>
+  </div>
+  <div class="result-card">
+    <div class="result-label">可用打卡点</div>
+    <div class="result-value">{{ detail.location_count if detail.location_count is not none else (locations|length) }}</div>
+    <div class="muted tiny">学校维护的签到地点</div>
+  </div>
+</section>
+
+{% if detail.today %}
+<section class="card">
+  <div class="card-head"><h2>今日记录（脱敏）</h2></div>
+  <div class="table-wrap">
+    <table class="table compact">
+      <tbody>
+        <tr><th>业务日期</th><td class="mono">{{ detail.today.business_date or '—' }}</td></tr>
+        <tr><th>状态码</th><td class="mono">{{ detail.today.record_status_code or '—' }}</td></tr>
+        <tr><th>打卡时间</th><td class="mono">{{ detail.today.checkin_time or '—' }}</td></tr>
+        <tr><th>距打卡点</th><td>{% if detail.today.distance_meter is not none %}{{ '%.1f'|format(detail.today.distance_meter) }} 米{% else %}—{% endif %}</td></tr>
+        <tr><th>异常标记</th><td>{{ '是（可能被判异常）' if detail.today.abnormal_flag else '否' }}</td></tr>
+        <tr><th>打卡地点</th><td>{{ detail.today.location_name or '—' }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if locations %}
+<section class="card">
+  <div class="card-head">
+    <h2>学校打卡点</h2>
+    <span class="muted tiny">点击“用此位置”会把坐标保存为该用户的打卡位置</span>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr><th>名称</th><th>地址</th><th>坐标</th><th>半径</th><th class="right">操作</th></tr>
+      </thead>
+      <tbody>
+        {% for loc in locations %}
+        <tr>
+          <td>
+            <div>{{ loc.location_name }}</div>
+            {% if loc.group_name %}<div class="muted tiny">{{ loc.group_name }}</div>{% endif %}
+          </td>
+          <td class="muted tiny">{{ loc.address or '—' }}</td>
+          <td class="mono tiny">{{ '%.6f'|format(loc.latitude) }}, {{ '%.6f'|format(loc.longitude) }}</td>
+          <td class="mono tiny">{{ loc.radius_meter }} m</td>
+          <td class="right">
+            <form method="post" action="/users/{{ user.id }}/apply-location" class="inline-form"
+                  onsubmit="return confirm('把“{{ loc.location_name }}”设为 {{ user.name }} 的打卡位置？')">
+              <input type="hidden" name="_csrf" value="{{ csrf }}">
+              <input type="hidden" name="latitude" value="{{ loc.latitude }}">
+              <input type="hidden" name="longitude" value="{{ loc.longitude }}">
+              <input type="hidden" name="location_name" value="{{ loc.location_name }}">
+              <input type="hidden" name="address" value="{{ loc.address }}">
+              <button class="btn btn-sm btn-primary" type="submit">用此位置</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% elif detail.session_valid %}
+<section class="card">
+  <div class="card-head"><h2>学校打卡点</h2></div>
+  <p class="muted">没有读取到打卡点列表。请确认账号在“晚安成电”微应用中已绑定宿舍，或稍后重试。</p>
+</section>
+{% endif %}
+
+{% if not outcome.ok %}
+<section class="card">
+  <div class="card-head"><h2>排查建议</h2></div>
+  <ul class="checklist">
+    <li><strong>提示需要二次验证：</strong>填写正确的浏览器指纹（<code>MULTIFACTOR_BROWSER_FINGERPRINT</code>）。</li>
+    <li><strong>提示密码错误：</strong>确认使用的是统一身份认证密码，不是教务系统或其他密码。</li>
+    <li><strong>提示登录无效 / 4001：</strong>通常是门户未预热或会话过期，系统已自动重试；仍失败请点“重新测试”。</li>
+    <li><strong>提示不在打卡范围：</strong>确认坐标是宿舍位置，且在打卡点半径内。</li>
+    <li><strong>网络错误：</strong>确认容器能访问 <code>idas.uestc.edu.cn</code> 与 <code>jzsz.uestc.edu.cn</code>。</li>
+  </ul>
+</section>
+{% endif %}
+
+{% endblock %}

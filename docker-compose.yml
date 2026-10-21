@@ -1,0 +1,51 @@
+name: uestc-autocheckin
+
+services:
+  checkin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: uestc-autocheckin:latest
+    container_name: uestc-autocheckin
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATA_DIR: /data
+      PORT: "8000"
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      APP_SECRET: ${APP_SECRET:-}
+      CHECKIN_WINDOW_START: ${CHECKIN_WINDOW_START:-21:30}
+      CHECKIN_WINDOW_END: ${CHECKIN_WINDOW_END:-23:00}
+      RETRY_INTERVAL_SEC: ${RETRY_INTERVAL_SEC:-180}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-20}
+      MIN_USER_GAP_SEC: ${MIN_USER_GAP_SEC:-30}
+      LOGIN_COOLDOWN_SEC: ${LOGIN_COOLDOWN_SEC:-600}
+      MAX_LOGINS_PER_DAY: ${MAX_LOGINS_PER_DAY:-3}
+      HTTP_TIMEOUT: ${HTTP_TIMEOUT:-20}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      REVERSE_GEOCODE: ${REVERSE_GEOCODE:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    volumes:
+      - checkin-data:/data
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  checkin-data:
+    name: uestc-checkin-data
+

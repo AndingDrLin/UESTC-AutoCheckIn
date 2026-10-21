@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}运行日志 · 晚安成电自动打卡{% endblock %}
+{% block content %}
+
+<section class="page-head">
+  <div>
+    <h1>运行日志</h1>
+    <p class="muted">共 {{ total }} 条记录 · 第 {{ page }} / {{ pages }} 页 · 日志保留在本地 SQLite 中</p>
+  </div>
+  <div class="head-actions">
+    <form method="post" action="/logs/clear" class="inline-form"
+          onsubmit="return confirm('清空全部运行日志？此操作不可恢复。')">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button class="btn btn-sm btn-danger-ghost" type="submit">清空日志</button>
+    </form>
+    <a class="btn btn-sm btn-ghost" href="/">返回仪表盘</a>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2>筛选</h2>
+    <form method="get" action="/logs" class="filter-form">
+      <select name="user_id" onchange="this.form.submit()" aria-label="按用户筛选">
+        <option value="">全部用户</option>
+        {% for u in users %}
+        <option value="{{ u.id }}" {% if selected_user == u.id|string %}selected{% endif %}>{{ u.name }}（{{ u.student_id }}）</option>
+        {% endfor %}
+      </select>
+      <noscript><button class="btn btn-sm" type="submit">筛选</button></noscript>
+    </form>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table logs-table">
+      <thead>
+        <tr><th>时间</th><th>级别</th><th>用户</th><th>事件</th><th>消息</th><th>详情</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {% set level_class = 'ok' if row.level == 'INFO' else ('warn' if row.level == 'WARNING' else ('bad' if row.level == 'ERROR' else 'muted')) %}
+        <tr>
+          <td class="mono tiny nowrap">{{ row.ts|localtime }}</td>
+          <td><span class="badge {{ level_class }}">{{ row.level }}</span></td>
+          <td class="tiny">{{ row.user_name or '系统' }}</td>
+          <td class="mono tiny">{{ row.event or '—' }}</td>
+          <td class="message-cell">{{ row.message }}</td>
+          <td class="tiny">
+            {% if row.detail %}
+            <details><summary>查看</summary><pre class="detail-pre">{{ row.detail }}</pre></details>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6"><div class="empty">暂无日志。</div></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if pages > 1 %}
+  <nav class="pagination" aria-label="分页">
+    {% if page > 1 %}
+    <a class="btn btn-sm" href="/logs?page={{ page - 1 }}{% if selected_user %}&user_id={{ selected_user }}{% endif %}">上一页</a>
+    {% else %}
+    <span class="btn btn-sm disabled">上一页</span>
+    {% endif %}
+    <span class="muted tiny">第 {{ page }} / {{ pages }} 页</span>
+    {% if page < pages %}
+    <a class="btn btn-sm" href="/logs?page={{ page + 1 }}{% if selected_user %}&user_id={{ selected_user }}{% endif %}">下一页</a>
+    {% else %}
+    <span class="btn btn-sm disabled">下一页</span>
+    {% endif %}
+  </nav>
+  {% endif %}
+</section>
+
+{% endblock %}

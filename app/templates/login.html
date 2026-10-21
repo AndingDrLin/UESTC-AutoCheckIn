@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}登录 · 晚安成电自动打卡{% endblock %}
+{% block content %}
+<section class="login-wrap">
+  <div class="login-card">
+    <div class="login-moon">🌙</div>
+    <h1>晚安成电 · 自动打卡</h1>
+    <p class="muted">输入管理密码进入控制台。用户凭据仅保存在本机数据卷中。</p>
+    <form method="post" action="/login" class="stack">
+      <label for="password">管理密码</label>
+      <input id="password" type="password" name="password" autofocus required
+             autocomplete="current-password" placeholder="ADMIN_PASSWORD">
+      <button class="btn btn-primary btn-block" type="submit">进入控制台</button>
+    </form>
+    {% if settings.is_default_password %}
+    <div class="alert alert-warn small">
+      当前仍在使用默认管理密码 <code>changeme</code>。部署后请立即在 <code>.env</code> 中修改
+      <code>ADMIN_PASSWORD</code> 并重启容器。
+    </div>
+    {% endif %}
+    <p class="login-foot muted tiny">仅供个人/小范围自用。请勿在未启用 HTTPS 的情况下暴露到公网。</p>
+  </div>
+</section>
+{% endblock %}

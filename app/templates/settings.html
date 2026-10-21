@@ -1,0 +1,101 @@
+﻿{% extends "base.html" %}
+{% block title %}设置 · 晚安成电自动打卡{% endblock %}
+{% block content %}
+
+<section class="page-head">
+  <div>
+    <h1>设置与运行状态</h1>
+    <p class="muted">配置通过环境变量注入；修改 <code>.env</code> 后重启容器生效。</p>
+  </div>
+  <div class="head-actions">
+    <a class="btn btn-sm btn-ghost" href="/">返回仪表盘</a>
+  </div>
+</section>
+
+{% if info.get('is_default_password') %}
+<div class="alert alert-warn">
+  <strong>默认管理密码仍未修改。</strong>请在 <code>.env</code> 中设置强 <code>ADMIN_PASSWORD</code>，然后
+  <code>docker compose up -d</code> 重启。
+</div>
+{% endif %}
+
+<section class="grid-2">
+  <div class="card">
+    <div class="card-head"><h2>运行状态</h2></div>
+    <table class="table compact">
+      <tbody>
+        <tr><th>版本</th><td class="mono">{{ info.get('version') }}</td></tr>
+        <tr><th>时区</th><td class="mono">{{ info.get('tz_name') }}</td></tr>
+        <tr><th>自动打卡窗口</th><td class="mono">{{ info.get('window_start') }}–{{ info.get('window_end') }}</td></tr>
+        <tr><th>平台可提交时段</th><td class="mono">{{ platform_window }}</td></tr>
+        <tr><th>调度器</th><td>
+          {% if info.scheduler.alive %}<span class="badge ok">运行中</span>
+          {% elif info.scheduler.enabled %}<span class="badge bad">已启用但未运行</span>
+          {% else %}<span class="badge muted">已禁用</span>{% endif %}
+        </td></tr>
+        <tr><th>上次调度</th><td class="mono tiny">{{ info.scheduler.last_tick|localtime }}</td></tr>
+        <tr><th>启动时间</th><td class="mono tiny">{{ info.scheduler.started_at|localtime }}</td></tr>
+        <tr><th>用户数</th><td class="mono">{{ user_count }}</td></tr>
+        <tr><th>日志条数</th><td class="mono">{{ log_count }}</td></tr>
+        <tr><th>数据库大小</th><td class="mono">{{ info.get('db_size') }} 字节</td></tr>
+        <tr><th>数据库路径</th><td class="mono tiny">{{ info.get('db_path') }}</td></tr>
+        <tr><th>数据目录</th><td class="mono tiny">{{ info.get('data_dir') }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>安全</h2></div>
+    <table class="table compact">
+      <tbody>
+        <tr><th>管理密码</th><td>{{ '默认值（不安全）' if info.get('is_default_password') else '已自定义' }}</td></tr>
+        <tr><th>会话密钥来源</th><td class="mono">{{ info.get('secret_source') }}</td></tr>
+        <tr><th>Cookie Secure</th><td>{{ '开启' if info.get('cookie_secure') else '关闭（HTTP 部署）' }}</td></tr>
+        <tr><th>反向地理编码</th><td>{{ '开启' if info.get('reverse_geocode') else '关闭（使用已保存地址）' }}</td></tr>
+        <tr><th>HTTP 超时</th><td class="mono">{{ info.get('http_timeout') }} 秒</td></tr>
+        <tr><th>登录冷却</th><td class="mono">{{ info.get('login_cooldown_sec') }} 秒</td></tr>
+        <tr><th>每日登录上限</th><td class="mono">{{ info.get('max_logins_per_day') }} 次</td></tr>
+        <tr><th>失败重试间隔</th><td class="mono">{{ info.get('retry_interval_sec') }} 秒（退避）</td></tr>
+        <tr><th>单用户最大尝试</th><td class="mono">{{ info.get('max_attempts') }} 次</td></tr>
+        <tr><th>多用户最小间隔</th><td class="mono">{{ info.get('min_user_gap_sec') }} 秒</td></tr>
+      </tbody>
+    </table>
+    <p class="muted tiny">
+      用户密码使用 Fernet 对称加密后存入 SQLite；密钥来自 <code>APP_SECRET</code> 或数据卷中的
+      <code>secret.key</code>。请同时备份两者，否则已保存的密码无法解密。
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2>环境变量</h2>
+    <span class="muted tiny">完整说明见 <code>README.md</code></span>
+  </div>
+  <div class="table-wrap">
+    <table class="table compact env-table">
+      <thead><tr><th>变量</th><th>当前值 / 默认</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">ADMIN_PASSWORD</td><td class="mono">••••••</td><td>管理后台密码，部署前必须修改。</td></tr>
+        <tr><td class="mono">APP_SECRET</td><td class="mono">{{ '已设置' if info.get('secret_source') == 'env' else '自动生成（数据卷）' }}</td><td>加密与会话签名密钥；多实例部署必须固定。</td></tr>
+        <tr><td class="mono">TZ</td><td class="mono">{{ info.get('tz_name') }}</td><td>容器时区，默认 <code>Asia/Shanghai</code>。</td></tr>
+        <tr><td class="mono">CHECKIN_WINDOW_START</td><td class="mono">{{ info.get('window_start') }}</td><td>随机窗口开始，默认 21:30。</td></tr>
+        <tr><td class="mono">CHECKIN_WINDOW_END</td><td class="mono">{{ info.get('window_end') }}</td><td>随机窗口结束，默认 23:00。</td></tr>
+        <tr><td class="mono">RETRY_INTERVAL_SEC</td><td class="mono">{{ info.get('retry_interval_sec') }}</td><td>失败重试基准间隔。</td></tr>
+        <tr><td class="mono">MAX_ATTEMPTS</td><td class="mono">{{ info.get('max_attempts') }}</td><td>窗口内最大提交尝试次数。</td></tr>
+        <tr><td class="mono">MAX_LOGINS_PER_DAY</td><td class="mono">{{ info.get('max_logins_per_day') }}</td><td>防止频繁登录触发风控。</td></tr>
+        <tr><td class="mono">LOGIN_COOLDOWN_SEC</td><td class="mono">{{ info.get('login_cooldown_sec') }}</td><td>两次登录之间的最小间隔。</td></tr>
+        <tr><td class="mono">SCHEDULER_ENABLED</td><td class="mono">{{ 'true' if info.get('scheduler_enabled') else 'false' }}</td><td>关闭后只保留 Web 与手动操作。</td></tr>
+        <tr><td class="mono">REVERSE_GEOCODE</td><td class="mono">{{ 'true' if info.get('reverse_geocode') else 'false' }}</td><td>提交前是否调用学校逆地理编码接口。</td></tr>
+        <tr><td class="mono">NOTIFY_WEBHOOK</td><td class="mono">{{ '已设置' if info.get('notify_webhook') else '未设置' }}</td><td>全局通知地址，用户级可覆盖。</td></tr>
+        <tr><td class="mono">COOKIE_SECURE</td><td class="mono">{{ 'true' if info.get('cookie_secure') else 'false' }}</td><td>仅在 HTTPS 反代后开启。</td></tr>
+        <tr><td class="mono">HTTP_TIMEOUT</td><td class="mono">{{ info.get('http_timeout') }}</td><td>单次学校接口请求超时（秒）。</td></tr>
+        <tr><td class="mono">DATA_DIR</td><td class="mono">{{ info.get('data_dir') }}</td><td>SQLite、密钥等持久化目录。</td></tr>
+        <tr><td class="mono">PORT</td><td class="mono">{{ info.get('port') }}</td><td>容器内监听端口，默认 8000。</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% endblock %}
+

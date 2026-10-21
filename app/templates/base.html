@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{% block title %}晚安成电 · 自动打卡{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/">
+        <span class="brand-moon">🌙</span>
+        <span class="brand-text">晚安成电<small>自动打卡</small></span>
+      </a>
+      {% if session %}
+      <nav class="nav" aria-label="主导航">
+        <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">仪表盘</a>
+        <a href="/logs" class="{{ 'active' if request.url.path.startswith('/logs') else '' }}">运行日志</a>
+        <a href="/settings" class="{{ 'active' if request.url.path.startswith('/settings') else '' }}">设置</a>
+        <a href="/users/new" class="btn btn-sm btn-primary">＋ 添加用户</a>
+        <form method="post" action="/logout" class="inline-form">
+          <input type="hidden" name="_csrf" value="{{ csrf }}">
+          <button type="submit" class="btn btn-sm btn-ghost">退出</button>
+        </form>
+      </nav>
+      {% endif %}
+    </header>
+
+    <main class="container">
+      {% if msg %}
+      <div class="alert alert-{{ level }}" role="status">{{ msg }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+      <span>UESTC 晚安成电 · 自动打卡 <span class="mono">v{{ app_version }}</span></span>
+      <span>计划时段 {{ settings.window_start }}–{{ settings.window_end }} · 平台时段 {{ platform_window }} · {{ settings.tz_name }}</span>
+    </footer>
+  </div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
