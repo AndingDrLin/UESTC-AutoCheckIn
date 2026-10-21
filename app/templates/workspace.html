@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}班级工作台 · 晚安成电{% endblock %}
+{% block content %}
+<section class="page-head"><div><h1>班级工作台</h1><p class="muted">学校权限由当前账号实际查询决定。不会自动切换账号；勾选学生后先预览，再确认提交。</p></div><a class="btn" href="/accounts/new">添加账号</a></section>
+<form method="get" action="/" class="card workspace-filters">
+<label>操作账号<select name="account_id" required><option value="">请选择账号</option>{% for a in accounts %}<option value="{{ a.id }}" {% if account and a.id == account.id %}selected{% endif %}>{{ a.name }} · {{ a.student_id }}</option>{% endfor %}</select></label>
+<label>业务日期<input type="date" name="business_date" value="{{ business_date }}" required></label>
+<label>班级<select name="class_key"><option value="">全部可管理班级</option>{% for c in classes %}<option value="{{ c.classKey }}" {% if class_key == c.classKey %}selected{% endif %}>{{ c.manageClass or c.className or c.name or c.classKey }}{% if c.collegeName %} · {{ c.collegeName }}{% endif %}{% if c.grade %} · {{ c.grade }}{% endif %}</option>{% endfor %}</select></label>
+<label>姓名 / 精确学号<input name="keyword" value="{{ keyword }}" placeholder="姓名包含匹配，学号精确匹配"></label>
+<label>情况<select name="location"><option value="">请选择情况</option>{% for t in options.types %}<option value="{{ t.label }}" {% if location in [t.label, t.value] %}selected{% endif %}>{{ t.label }}</option>{% endfor %}</select></label>
+<button class="btn btn-primary" type="submit">查询 / 加载原因</button><button class="btn" name="refresh" value="true">强制刷新</button>
+</form>
+{% if not account %}<div class="empty"><p>请选择操作账号后查询班级名册。</p>{% if not accounts %}<a href="/accounts/new">尚无账号，添加第一个账号</a>{% endif %}</div>{% else %}
+<p class="muted">当前账号：{{ account.name }} · {{ account.student_id }}　业务日期：{{ business_date }}　最近读取：{{ refreshed_at }}　共 {{ roster|length }} 人</p>
+<form method="post" action="/reports/preview" id="report-form">
+<input type="hidden" name="_csrf" value="{{ csrf }}"><input type="hidden" name="account_id" value="{{ account.id }}"><input type="hidden" name="business_date" value="{{ business_date }}">
+<div class="card table-wrap"><table class="table"><thead><tr><th><input type="checkbox" id="select-all" aria-label="选择当前结果全部学生"></th><th>姓名</th><th>学号</th><th>班级</th><th>宿舍</th><th>学校当前状态</th></tr></thead><tbody>
+{% for s in roster %}<tr><td><input type="checkbox" name="targets" value='{{ {"student_id": s.studentSn or s.student_id, "student_name": s.studentName or s.student_name, "class_key": s.classKey}|tojson }}' aria-label="选择 {{ s.studentName or s.student_name }}"></td><td>{{ s.studentName or s.student_name }}</td><td class="mono">{{ s.studentSn or s.student_id }}</td><td>{{ s.manageClass or s.className or s.classKey }}</td><td>{{ s.dormitoryLocation or '—' }}</td><td>{{ s.recordStatusLabel or s.checkinStatusName or s.statusName or s.recordStatusCode or s.checkinStatus or s.status or '学校未返回状态' }}</td></tr>{% else %}<tr><td colspan="6">没有匹配学生；查询失败时请查看上方错误信息。</td></tr>{% endfor %}
+</tbody></table></div>
+<section class="card workspace-filters"><label>上报情况<select name="location" id="report-location" required><option value="">请选择</option>{% for t in options.types %}<option value="{{ t.label }}" {% if location in [t.label, t.value] %}selected{% endif %}>{{ t.label }}</option>{% endfor %}</select></label><label>中文原因<select name="reason" id="report-reason" required><option value="">请选择原因</option>{% for k in options.keywords %}<option value="{{ k.keyword }}">{{ k.keyword }}{% if k.remarkRequired %}（必填说明）{% endif %}</option>{% endfor %}</select></label><label>说明<textarea name="remark" rows="2" placeholder="原因要求说明时必填"></textarea></label><button class="btn btn-primary" type="submit">预览已选学生（不提交）</button><span id="options-status" role="status"></span></section>
+</form>{% endif %}
+{% endblock %}
+{% block scripts %}{% if account %}<script>
+document.querySelector('.workspace-filters [name=account_id]').addEventListener('change', function(){document.querySelector('[name=class_key]').value=''; document.querySelector('.workspace-filters [name=location]').value='';});
+document.getElementById('select-all').addEventListener('change', function(){document.querySelectorAll('[name=targets]').forEach(el => el.checked=this.checked);});
+document.getElementById('report-location').addEventListener('change', async function(){
+ const reason=document.getElementById('report-reason'), status=document.getElementById('options-status'); reason.replaceChildren(new Option('请选择原因','')); reason.disabled=true;
+ try {const response=await fetch('/accounts/{{ account.id }}/options?location='+encodeURIComponent(this.value)); const data=await response.json(); if(!response.ok)throw Error(data.error||'读取失败'); data.keywords.forEach(k=>reason.add(new Option(k.keyword+(k.remarkRequired?'（必填说明）':''),k.keyword))); status.textContent='';}catch(e){status.textContent=e.message;}finally{reason.disabled=false;}
+});
+document.getElementById('report-form').addEventListener('submit', function(e){if(!document.querySelector('[name=targets]:checked')){e.preventDefault();alert('请显式勾选至少一名学生');}});
+</script>{% endif %}{% endblock %}

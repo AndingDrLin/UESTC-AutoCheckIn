@@ -6,13 +6,15 @@ the web UI, the CLI and the background thread all call :meth:`run`.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
-from ..config import Settings
+from ..config import PLATFORM_WINDOW_END, PLATFORM_WINDOW_START, Settings
 from ..db import Database
 from ..notifier import Notifier
 from ..security import SecretBox, SecretMismatch
@@ -96,6 +98,31 @@ class CheckinService:
         self._client_factory = client_factory or self._default_client
         self._now = now or (lambda: datetime.now(self.settings.tz))
         self._sleep = sleep
+
+    @contextmanager
+    def authenticated_client(self, account: dict):
+        """Yield a warmed H5 client, serializing the account's session lifecycle."""
+        with self.db.account_lock(int(account['id'])):
+            current = self.db.get_user(int(account['id']))
+            if current is None:
+                raise ServiceError('账号已删除')
+            client = self._client_factory(current)
+            valid = False
+            try:
+                self.prepare_session(current, client, self._now())
+                valid = True
+                yield client
+            except SessionInvalid:
+                valid = False
+                self.db.mark_session_invalid(int(account['id']))
+                raise
+            finally:
+                try:
+                    if valid:
+                        self._save_session(current, client)
+                except Exception:
+                    logger.warning('session persistence failed', exc_info=True)
+                client.close()
 
     # -- helpers ------------------------------------------------------------
     def _default_client(self, user: dict) -> UestcHttp:
@@ -191,19 +218,16 @@ class CheckinService:
         except HttpStatusError as exc:
             raise RetryableError(f"登录成功，但门户预热返回 HTTP {exc.status}") from exc
 
-    def _prepare(
-        self, user: dict, client: UestcHttp, now: datetime
-    ) -> tuple[checkin.TodayStatus, bool]:
-        """Return today's record plus whether a fresh login was used."""
+    def prepare_session(self, user: dict, client: UestcHttp, now: datetime) -> bool:
+        """Authenticate the H5 session without requiring a personal daily record."""
         if self._restore_session(user, client):
             try:
                 checkin.warm_up(client)
                 entry = checkin.enter_app(client)
                 if not entry.reached:
                     raise SessionInvalid("微应用未放行（checkLogin 未跳转到 H5）")
-                today = checkin.fetch_today(client)
                 logger.debug("reused cached session for %s", user.get("name"))
-                return today, False
+                return False
             except SessionInvalid:
                 self.db.mark_session_invalid(int(user["id"]))
                 client.clear_cookie("SESSION")
@@ -225,7 +249,21 @@ class CheckinService:
             raise RetryableError(
                 "登录成功，但微应用仍未放行（checkLogin 未跳转到 H5），稍后重试"
             )
-        return checkin.fetch_today(client), True
+        return True
+
+    def _prepare(
+        self, user: dict, client: UestcHttp, now: datetime
+    ) -> tuple[checkin.TodayStatus, bool]:
+        login_used = self.prepare_session(user, client, now)
+        try:
+            return checkin.fetch_today(client), login_used
+        except (SessionInvalid, HttpStatusError):
+            if login_used:
+                raise
+            self.db.mark_session_invalid(int(user['id']))
+            client.clear_cookie('SESSION')
+            self.prepare_session(user, client, now)
+            return checkin.fetch_today(client), True
 
     def _address_for(
         self, user: dict, client: UestcHttp, latitude: float, longitude: float
@@ -259,7 +297,8 @@ class CheckinService:
     # -- public API ---------------------------------------------------------
     def run(self, user: dict, manual: bool = False) -> Outcome:
         try:
-            return self._run_inner(user, manual)
+            with self.db.account_lock(int(user['id'])):
+                return self._run_inner(user, manual)
         except ServiceError as exc:
             self._log(user, "ERROR", "fatal", str(exc))
             return Outcome(False, True, str(exc))
@@ -324,6 +363,12 @@ class CheckinService:
 
             latitude = float(user["latitude"])
             longitude = float(user["longitude"])
+            if not (math.isfinite(latitude) and math.isfinite(longitude)
+                    and -90 <= latitude <= 90 and -180 <= longitude <= 180
+                    and latitude != 0 and longitude != 0):
+                return Outcome(False, True, '个人打卡需要有效的非零经纬度')
+            if not PLATFORM_WINDOW_START <= now.time().replace(tzinfo=None) < PLATFORM_WINDOW_END:
+                return Outcome(False, True, '当前不在学校个人打卡时段 21:00–23:30')
             address = self._address_for(user, client, latitude, longitude)
             payload = checkin.build_payload(
                 latitude,

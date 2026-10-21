@@ -1,14 +1,14 @@
 {% extends "base.html" %}
-{% block title %}{{ '编辑用户' if mode == 'edit' else '添加用户' }} · 晚安成电自动打卡{% endblock %}
+{% block title %}{{ '编辑账号' if mode == 'edit' else '添加账号' }} · 晚安成电{% endblock %}
 {% block content %}
 
 <section class="page-head">
   <div>
-    <h1>{{ '编辑用户' if mode == 'edit' else '添加用户' }}</h1>
-    <p class="muted">保存后调度器会为今天生成一个随机打卡时间；已成功的记录不会重复提交。</p>
+    <h1>{{ '编辑账号' if mode == 'edit' else '添加账号' }}</h1>
+    <p class="muted">账号用于学校授权的班级管理。个人签到配置可选，只有明确启用后才自动安排计划。</p>
   </div>
   <div class="head-actions">
-    <a class="btn btn-ghost" href="/">返回仪表盘</a>
+    <a class="btn btn-ghost" href="/accounts">返回学校账号</a>
   </div>
 </section>
 
@@ -61,8 +61,8 @@
 
   <section class="form-section">
     <div class="section-head">
-      <h2>宿舍位置</h2>
-      <p class="muted tiny">坐标决定系统判定的距离。请填写宿舍所在位置的 GCJ-02 坐标，越准确越好。</p>
+      <h2>个人签到位置（仅班级管理可不填）</h2>
+      <p class="muted tiny">个人签到须配置真实 GCJ-02 坐标。不开启个人签到时可留空；保存账号不会访问学校。</p>
     </div>
     <div class="field-grid">
       <label class="field">
@@ -79,12 +79,12 @@
       </label>
       <label class="field">
         <span>纬度 latitude</span>
-        <input name="latitude" type="number" step="0.000001" min="-90" max="90" required
+        <input name="latitude" type="number" step="0.000001" min="-90" max="90"
                value="{{ user.latitude if user.latitude is not none else '' }}" placeholder="30.754980">
       </label>
       <label class="field">
         <span>经度 longitude</span>
-        <input name="longitude" type="number" step="0.000001" min="-180" max="180" required
+        <input name="longitude" type="number" step="0.000001" min="-180" max="180"
                value="{{ user.longitude if user.longitude is not none else '' }}" placeholder="103.933883">
       </label>
     </div>
@@ -127,13 +127,13 @@
     </div>
     <label class="switch">
       <input type="checkbox" name="enabled" value="1" {% if user.enabled %}checked{% endif %}>
-      <span>启用自动打卡</span>
+      <span>明确启用此账号的个人自动签到（与班级管理无关）</span>
     </label>
   </section>
 
   <div class="form-actions">
-    <button type="submit" class="btn btn-primary">{{ '保存修改' if mode == 'edit' else '添加用户' }}</button>
-    <a class="btn btn-ghost" href="/">取消</a>
+    <button type="submit" class="btn btn-primary">{{ '保存修改' if mode == 'edit' else '添加账号' }}</button>
+    <a class="btn btn-ghost" href="/accounts">取消</a>
     {% if mode == 'edit' %}
     <span class="muted tiny">学号：<span class="mono">{{ user.student_id }}</span></span>
     {% endif %}
@@ -154,7 +154,7 @@
     btn.disabled = true;
     status.textContent = '正在登录并读取打卡点…';
     try {
-      var res = await fetch('/users/{{ user.id }}/locations', {
+      var res = await fetch('/accounts/{{ user.id }}/locations', {
         method: 'POST',
         headers: { 'X-CSRF-Token': '{{ csrf }}' }
       });

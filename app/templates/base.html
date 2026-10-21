@@ -16,10 +16,13 @@
       </a>
       {% if session %}
       <nav class="nav" aria-label="主导航">
-        <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">仪表盘</a>
+        <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">班级工作台</a>
+        <a href="/accounts">学校账号</a>
+        <a href="/rules">上报规则</a>
+        <a href="/self">个人签到</a>
         <a href="/logs" class="{{ 'active' if request.url.path.startswith('/logs') else '' }}">运行日志</a>
         <a href="/settings" class="{{ 'active' if request.url.path.startswith('/settings') else '' }}">设置</a>
-        <a href="/users/new" class="btn btn-sm btn-primary">＋ 添加用户</a>
+        <a href="/accounts/new" class="btn btn-sm btn-primary">添加账号</a>
         <form method="post" action="/logout" class="inline-form">
           <input type="hidden" name="_csrf" value="{{ csrf }}">
           <button type="submit" class="btn btn-sm btn-ghost">退出</button>

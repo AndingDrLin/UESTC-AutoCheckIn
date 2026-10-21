@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}上报预览 · 晚安成电{% endblock %}
+{% block content %}<h1>上报预览（尚未提交）</h1><p>操作账号：{{ account.name }} · {{ account.student_id }}　业务日期：{{ preview.business_date }}</p><p class="alert alert-warn">请核对每名学生和内容。预览保存在服务器并有有效期；确认只可使用一次。学校返回确认不代表独立核验成功，结果不确定时不要盲目重试。</p>
+<div class="card table-wrap"><table class="table"><thead><tr><th>姓名</th><th>学号</th><th>班级</th><th>情况</th><th>原因</th><th>说明</th></tr></thead><tbody>{% for e in preview.entries %}<tr><td>{{ e.student_name }}</td><td>{{ e.student_id }}</td><td>{{ e.class_key }}</td><td>{{ e.location }}</td><td>{{ e.reason }}</td><td>{{ e.remark }}</td></tr>{% endfor %}</tbody></table></div>
+<form method="post" action="/reports/submit" class="form-actions"><input type="hidden" name="_csrf" value="{{ csrf }}"><input type="hidden" name="account_id" value="{{ account.id }}"><input type="hidden" name="preview_id" value="{{ preview.id }}"><button class="btn btn-primary" type="submit">确认提交以上 {{ preview.entries|length }} 人</button><a class="btn" href="/?account_id={{ account.id }}&business_date={{ preview.business_date }}">取消并返回</a></form>{% endblock %}

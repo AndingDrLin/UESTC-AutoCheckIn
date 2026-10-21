@@ -615,3 +615,11 @@ details summary { cursor: pointer; color: var(--accent); }
   .stats, .result-grid { grid-template-columns: 1fr; }
   .brand-text small { display: none; }
 }
+
+.workspace-filters { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; padding: 20px; margin-bottom: 20px; }
+.workspace-filters label { display: flex; flex-direction: column; gap: 7px; min-width: 160px; flex: 1; }
+.workspace-filters input:not([type=checkbox]), .workspace-filters select, .workspace-filters textarea { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid #d8dee9; border-radius: 8px; background: white; font: inherit; }
+.workspace-filters input[type=checkbox], .table input[type=checkbox] { width: 18px; height: 18px; }
+.nav { flex-wrap: wrap; }
+.card > h2 { padding: 16px 20px 0; }
+.card > p { padding: 0 20px; }

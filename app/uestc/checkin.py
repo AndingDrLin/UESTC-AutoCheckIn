@@ -66,7 +66,7 @@ def is_session_message(message: str) -> bool:
     return any(keyword in text for keyword in _SESSION_KEYWORDS)
 
 
-def _parse_json(response, url: str):
+def _parse_envelope(response, url: str) -> dict:
     if response.status_code in (301, 302, 401, 403):
         raise SessionInvalid(
             f"接口返回 HTTP {response.status_code}，登录态失效或微应用未授权"
@@ -91,7 +91,11 @@ def _parse_json(response, url: str):
         if str(code) == "4001" or is_session_message(message):
             raise SessionInvalid(message)
         raise ApiError(code, message)
-    return payload.get("data")
+    return payload
+
+
+def _parse_json(response, url: str):
+    return _parse_envelope(response, url).get("data")
 
 
 def warm_up(client: UestcHttp):

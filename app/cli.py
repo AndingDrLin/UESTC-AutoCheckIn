@@ -1,523 +1,444 @@
-"""Administrative CLI.
-
-Examples::
-
-    python -m app.cli user add --name 张三 --student-id 2020000000000 \
-        --lat 30.75498 --lng 103.933883 --building "学知苑 5 栋" --room 512
-    python -m app.cli user list
-    python -m app.cli plan show
-    python -m app.cli run --student-id 2020000000000 --dry-run
-    python -m app.cli doctor --network
-    python -m app.cli serve
-"""
+"""Account administration, explicit reporting, and optional personal check-in CLI."""
 from __future__ import annotations
 
 import argparse
 import getpass
 import json
+import math
 import sys
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Any
 
-from .config import Settings, load_settings, parse_hhmm, setup_logging
+from .config import (
+    PLATFORM_WINDOW_END, PLATFORM_WINDOW_START, Settings, load_settings,
+    parse_hhmm, setup_logging,
+)
 from .db import Database, DuplicateStudentId
 from .notifier import Notifier
 from .scheduler import CheckinScheduler
 from .security import SecretBox, SecretMismatch
+from .uestc.admin_service import AdminService
 from .uestc.cas import fetch_login_page
 from .uestc.errors import UestcError
 from .uestc.http import UestcHttp
 from .uestc.service import CheckinService
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 def _context(settings: Settings | None = None):
     cfg = settings or load_settings()
     db = Database(cfg.db_path)
     box = SecretBox(cfg.app_secret)
     notifier = Notifier(cfg)
     service = CheckinService(cfg, db, box, notifier)
-    scheduler = CheckinScheduler(cfg, db, service, notifier)
-    return cfg, db, box, service, scheduler
+    admin = AdminService(cfg, db, box, notifier)
+    scheduler = CheckinScheduler(cfg, db, service, notifier, admin_service=admin)
+    return cfg, db, box, service, scheduler, admin
 
 
-def _die(message: str, code: int = 1) -> int:
-    print(f"错误：{message}", file=sys.stderr)
-    return code
+def _emit(args: argparse.Namespace, payload: Any) -> None:
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    elif isinstance(payload, str):
+        print(payload)
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
-def _require_user(db: Database, student_id: str) -> dict | None:
-    user = db.get_user_by_student_id(student_id)
-    if user is None:
-        print(f"未找到学号为 {student_id} 的用户", file=sys.stderr)
-    return user
+def _require_account(db: Database, student_id: str) -> dict:
+    account = db.get_user_by_student_id(student_id)
+    if account is None:
+        raise ValueError(f"未找到大学账号 {student_id}")
+    return account
+
+
+def _public_account(account: dict) -> dict:
+    return {key: value for key, value in account.items() if key != "password_enc"}
 
 
 def _prompt_password(value: str | None, *, confirm: bool = False) -> str:
-    if value:
+    if value is not None:
+        if not value:
+            raise ValueError("密码不能为空")
         return value
     first = getpass.getpass("统一身份认证密码（输入不回显）: ")
-    if confirm:
-        second = getpass.getpass("再次输入密码: ")
-        if first != second:
-            raise ValueError("两次输入的密码不一致")
+    if confirm and first != getpass.getpass("再次输入密码: "):
+        raise ValueError("两次输入的密码不一致")
     if not first:
         raise ValueError("密码不能为空")
     return first
 
 
-def _parse_window(cfg: Settings, start: str | None, end: str | None) -> tuple[str, str]:
-    start_time = parse_hhmm(start) if start else cfg.window_start
-    end_time = parse_hhmm(end) if end else cfg.window_end
-    if end_time <= start_time:
-        raise ValueError("结束时间必须晚于开始时间")
-    return start_time.strftime("%H:%M"), end_time.strftime("%H:%M")
-
-
 def _check_coords(lat: float, lng: float) -> None:
-    if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+    if not math.isfinite(lat) or not math.isfinite(lng) or not (-90 <= lat <= 90 and -180 <= lng <= 180):
         raise ValueError("坐标超出合法范围")
     if abs(lat) < 1e-9 and abs(lng) < 1e-9:
-        raise ValueError("(0,0) 不是有效坐标")
+        raise ValueError("(0,0) 不是有效的个人打卡坐标")
 
 
-def _fingerprint(value: str | None) -> str:
-    text = (value or "").strip().upper().replace(" ", "")
-    if text and (len(text) != 32 or any(c not in "0123456789ABCDEF" for c in text)):
-        raise ValueError("浏览器指纹应为 32 位十六进制字符")
-    return text
+def _window(start: str, end: str) -> tuple[str, str]:
+    first, last = parse_hhmm(start), parse_hhmm(end)
+    if not PLATFORM_WINDOW_START <= first < last <= PLATFORM_WINDOW_END:
+        raise ValueError("个人打卡窗口必须在 21:00–23:30 内，且结束时间晚于开始时间")
+    return first.strftime("%H:%M"), last.strftime("%H:%M")
 
 
-def _print_user(user: dict, db: Database) -> None:
-    session = db.get_session(int(user["id"]))
-    print(f"用户 #{user['id']}  {user['name']}  ({user['student_id']})")
-    print(f"  状态      : {'启用' if user['enabled'] else '停用'}")
-    print(f"  宿舍      : {user['dorm_building'] or '—'} {user['dorm_room'] or ''}".rstrip())
-    print(f"  地址      : {user['address'] or '—'}")
-    print(f"  坐标      : {user['latitude']:.6f}, {user['longitude']:.6f}")
-    print(f"  打卡窗口  : {user['window_start']}–{user['window_end']}")
-    print(f"  指纹      : {user['fingerprint'] or '未配置'}")
-    print(f"  密码      : {'已保存（加密）' if user['password_enc'] else '缺失'}")
-    print(f"  通知      : {user['notify_url'] or '—'}")
-    if session:
-        state = "已失效" if session["invalid"] else "已缓存"
-        print(
-            f"  会话      : {state}，最近登录 "
-            f"{datetime.fromtimestamp(int(session['last_login_epoch'])).isoformat() if session['last_login_epoch'] else '—'}"
-            f"，今日登录 {session['logins_today'] or 0} 次"
-        )
-    else:
-        print("  会话      : 尚未登录")
+def _validate_personal(account: dict) -> None:
+    _check_coords(float(account["latitude"]), float(account["longitude"]))
+    _window(account["window_start"], account["window_end"])
 
 
-# ---------------------------------------------------------------------------
-# commands
-# ---------------------------------------------------------------------------
-def cmd_user_add(args: argparse.Namespace) -> int:
-    cfg, db, box, _, scheduler = _context()
-    try:
-        window_start, window_end = _parse_window(cfg, args.window_start, args.window_end)
-        _check_coords(args.lat, args.lng)
-        fingerprint = _fingerprint(args.fingerprint)
-        password = _prompt_password(args.password)
-    except ValueError as exc:
-        return _die(str(exc))
-    if len(args.student_id) < 4 or not args.student_id.isalnum():
-        return _die("学号应为 4 位以上的字母或数字")
-    if db.get_user_by_student_id(args.student_id):
-        return _die(f"学号 {args.student_id} 已存在")
-    try:
-        user_id = db.create_user(
-            name=args.name.strip(),
-            student_id=args.student_id.strip(),
-            password_enc=box.encrypt(password),
-            fingerprint=fingerprint,
-            dorm_building=(args.building or "").strip(),
-            dorm_room=(args.room or "").strip(),
-            address=(args.address or "").strip(),
-            latitude=round(args.lat, 6),
-            longitude=round(args.lng, 6),
-            window_start=window_start,
-            window_end=window_end,
-            notify_url=(args.notify_url or "").strip(),
-            notes=(args.notes or "").strip(),
-            enabled=0 if args.disabled else 1,
-        )
-    except DuplicateStudentId as exc:
-        return _die(str(exc))
-    db.add_log(f"CLI 新增用户 {args.name}", user_id=user_id, user_name=args.name, event="cli.user.add")
-    if not args.disabled:
-        scheduler.ensure_plans()
-    print(f"已添加用户 #{user_id} {args.name}（{args.student_id}）")
-    print(f"打卡窗口：{window_start}–{window_end}；今天将由调度器随机安排。")
-    return 0
-
-
-def cmd_user_update(args: argparse.Namespace) -> int:
-    cfg, db, box, _, scheduler = _context()
-    user = _require_user(db, args.student_id)
-    if user is None:
-        return 1
+def _configuration(args: argparse.Namespace, cfg: Settings, account: dict | None = None) -> dict:
+    existing = account or {}
     fields: dict[str, Any] = {}
-    try:
-        if args.name is not None:
-            fields["name"] = args.name.strip()
-        if args.fingerprint is not None:
-            fields["fingerprint"] = _fingerprint(args.fingerprint)
-        if args.building is not None:
-            fields["dorm_building"] = args.building.strip()
-        if args.room is not None:
-            fields["dorm_room"] = args.room.strip()
-        if args.address is not None:
-            fields["address"] = args.address.strip()
-        if args.notify_url is not None:
-            fields["notify_url"] = args.notify_url.strip()
-        if args.notes is not None:
-            fields["notes"] = args.notes.strip()
-        if args.lat is not None and args.lng is not None:
-            _check_coords(args.lat, args.lng)
-            fields["latitude"] = round(args.lat, 6)
-            fields["longitude"] = round(args.lng, 6)
-        if args.window_start is not None or args.window_end is not None:
-            start, end = _parse_window(cfg, args.window_start, args.window_end)
-            fields["window_start"] = start
-            fields["window_end"] = end
-        if args.disable:
-            fields["enabled"] = 0
-        elif args.enable:
-            fields["enabled"] = 1
-        password = args.password or ""
-        if password:
-            fields["password_enc"] = box.encrypt(password)
-    except ValueError as exc:
-        return _die(str(exc))
-    if not fields:
-        print("没有需要更新的字段。")
-        return 0
-    db.update_user(int(user["id"]), **fields)
-    if "password_enc" in fields:
-        db.clear_session(int(user["id"]))
-    db.delete_pending_plan(int(user["id"]), datetime.now(cfg.tz).date().isoformat())
-    db.add_log(
-        "CLI 更新用户 " + str(fields.get("name", user["name"])),
-        user_id=int(user["id"]),
-        user_name=str(fields.get("name", user["name"])),
-        event="cli.user.update",
-    )
-    if fields.get("enabled", 1):
-        scheduler.ensure_plans()
-    print(f"已更新用户 {user['student_id']}：{', '.join(sorted(fields))}")
-    return 0
-
-
-def cmd_user_list(args: argparse.Namespace) -> int:
-    _, db, _, _, _ = _context()
-    users = db.list_users()
-    if not users:
-        print("还没有用户。")
-        return 0
-    print(f"{'ID':<4} {'姓名':<12} {'学号':<16} {'状态':<5} {'窗口':<12} {'宿舍'}")
-    print("-" * 88)
-    for user in users:
-        dorm = f"{user['dorm_building']} {user['dorm_room']}".strip() or "—"
-        print(
-            f"{user['id']:<4} {user['name']:<12} {user['student_id']:<16} "
-            f"{'启用' if user['enabled'] else '停用':<5} "
-            f"{user['window_start'] + '-' + user['window_end']:<12} {dorm}"
+    for option, column in (
+        ("name", "name"), ("building", "dorm_building"), ("room", "dorm_room"),
+        ("address", "address"), ("notify_url", "notify_url"), ("notes", "notes"),
+    ):
+        value = getattr(args, option, None)
+        if value is not None:
+            fields[column] = value.strip()
+    if "name" in fields and not fields["name"]:
+        raise ValueError("账号名称不能为空")
+    fingerprint = getattr(args, "fingerprint", None)
+    if fingerprint is not None:
+        text = fingerprint.strip().upper().replace(" ", "")
+        if text and (len(text) != 32 or any(c not in "0123456789ABCDEF" for c in text)):
+            raise ValueError("浏览器指纹应为 32 位十六进制字符")
+        fields["fingerprint"] = text
+    lat, lng = getattr(args, "lat", None), getattr(args, "lng", None)
+    if (lat is None) != (lng is None):
+        raise ValueError("--lat 和 --lng 必须一起提供")
+    if lat is not None:
+        if not math.isfinite(lat) or not math.isfinite(lng) or not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            raise ValueError("坐标超出合法范围")
+        fields.update(latitude=round(lat, 6), longitude=round(lng, 6))
+    start, end = getattr(args, "window_start", None), getattr(args, "window_end", None)
+    if start is not None or end is not None or account is None:
+        first, last = _window(
+            start if start is not None else existing.get("window_start", cfg.window_start.strftime("%H:%M")),
+            end if end is not None else existing.get("window_end", cfg.window_end.strftime("%H:%M")),
         )
-    return 0
+        fields.update(window_start=first, window_end=last)
+    if existing.get("enabled"):
+        _validate_personal({**existing, **fields})
+    return fields
 
 
-def cmd_user_show(args: argparse.Namespace) -> int:
-    _, db, _, _, _ = _context()
-    user = _require_user(db, args.student_id)
-    if user is None:
-        return 1
-    _print_user(user, db)
-    return 0
+def _day(value: str | None, cfg: Settings) -> str:
+    return date.fromisoformat(value).isoformat() if value else datetime.now(cfg.tz).date().isoformat()
 
 
-def cmd_user_remove(args: argparse.Namespace) -> int:
-    _, db, _, _, _ = _context()
-    user = _require_user(db, args.student_id)
-    if user is None:
-        return 1
-    if not args.yes:
-        answer = input(f"确认删除 {user['name']}（{user['student_id']}）及其全部计划？[y/N] ")
-        if answer.strip().lower() not in {"y", "yes"}:
-            print("已取消。")
+def cmd_account(args: argparse.Namespace) -> int:
+    cfg, db, box, _, scheduler, _ = _context()
+    action = args.action
+    if action == "list":
+        _emit(args, [_public_account(account) for account in db.list_users()])
+        return 0
+    if action == "add":
+        student_id = args.student_id.strip()
+        if len(student_id) < 4 or not student_id.isalnum():
+            raise ValueError("大学学号应为 4 位以上的字母或数字")
+        if db.get_user_by_student_id(student_id):
+            raise ValueError(f"大学账号 {student_id} 已存在")
+        fields = _configuration(args, cfg)
+        fields.update(student_id=student_id, enabled=int(args.personal_enabled))
+        if args.personal_enabled:
+            _validate_personal({"latitude": 0, "longitude": 0, **fields})
+        fields["password_enc"] = box.encrypt(_prompt_password(args.password))
+        account_id = db.create_user(**fields)
+        db.add_log(f"CLI 新增大学账号 {student_id}", user_id=account_id, user_name=fields["name"], event="cli.account.add")
+        if args.personal_enabled:
+            scheduler.ensure_plans()
+        _emit(args, _public_account(db.get_user(account_id)))
+        return 0
+    account = _require_account(db, args.account)
+    account_id = int(account["id"])
+    if action == "show":
+        _emit(args, _public_account(account))
+    elif action == "remove":
+        if not args.yes and input(f"删除账号 {account['student_id']} 及其计划？[y/N] ").strip().lower() not in {"y", "yes"}:
+            _emit(args, {"status": "cancelled"})
             return 0
-    db.delete_user(int(user["id"]))
-    db.add_log(f"CLI 删除用户 {user['name']}", user_name=user["name"], event="cli.user.delete")
-    print(f"已删除用户 {user['student_id']}。")
+        db.delete_user(account_id)
+        db.add_log(f"CLI 删除大学账号 {account['student_id']}", user_name=account["name"], event="cli.account.remove")
+        _emit(args, {"status": "removed", "account": account["student_id"]})
+    elif action == "password":
+        db.update_user(account_id, password_enc=box.encrypt(_prompt_password(args.password, confirm=True)))
+        db.clear_session(account_id)
+        db.add_log(f"CLI 更新大学账号密码 {account['student_id']}", user_id=account_id, user_name=account["name"], event="cli.account.password")
+        _emit(args, {"status": "password_updated", "account": account["student_id"]})
+    elif action == "update":
+        fields = _configuration(args, cfg, account)
+        if fields:
+            db.update_user(account_id, **fields)
+            if "fingerprint" in fields and fields["fingerprint"] != account["fingerprint"]:
+                db.clear_session(account_id)
+            db.add_log(f"CLI 更新大学账号 {account['student_id']}：{', '.join(sorted(fields))}", user_id=account_id, user_name=account["name"], event="cli.account.update")
+            db.delete_pending_plan(account_id, _day(None, cfg))
+            if account["enabled"]:
+                scheduler.ensure_plans()
+        _emit(args, _public_account(db.get_user(account_id)))
     return 0
 
 
-def cmd_user_password(args: argparse.Namespace) -> int:
-    _, db, box, _, _ = _context()
-    user = _require_user(db, args.student_id)
-    if user is None:
-        return 1
-    try:
-        password = _prompt_password(args.password, confirm=True)
-    except ValueError as exc:
-        return _die(str(exc))
-    db.update_user(int(user["id"]), password_enc=box.encrypt(password))
-    db.clear_session(int(user["id"]))
-    db.add_log("CLI 更新密码", user_id=int(user["id"]), user_name=user["name"], event="cli.user.password")
-    print(f"已更新 {user['student_id']} 的密码，旧会话已清除。")
-    return 0
-
-
-def cmd_user_toggle(args: argparse.Namespace) -> int:
-    cfg, db, _, _, scheduler = _context()
-    user = _require_user(db, args.student_id)
-    if user is None:
-        return 1
-    value = 1 if args.enable else 0
-    db.update_user(int(user["id"]), enabled=value)
-    if value:
-        scheduler.ensure_plans()
+def cmd_admin(args: argparse.Namespace) -> int:
+    cfg, db, _, _, _, admin = _context()
+    account = _require_account(db, args.account)
+    if args.command == "class":
+        payload = admin.classes(account, refresh=args.refresh)
+    elif args.command == "student":
+        payload = admin.roster(account, _day(args.date, cfg), class_key=args.class_key, keyword=args.keyword, refresh=args.refresh)
+    elif args.options:
+        payload = admin.options(account, location=args.location, refresh=args.refresh)
     else:
-        db.delete_pending_plan(int(user["id"]), datetime.now(cfg.tz).date().isoformat())
-    db.add_log(
-        f"CLI {'启用' if value else '停用'}用户 {user['name']}",
-        user_id=int(user["id"]),
-        user_name=user["name"],
-        event="cli.user.toggle",
-    )
-    print(f"已{'启用' if value else '停用'} {user['student_id']}。")
+        targets = [{"student_id": value, "class_key": args.class_key} for value in args.student_id]
+        targets.extend({"student_name": value, "class_key": args.class_key} for value in args.student_name)
+        if not targets:
+            raise ValueError("必须通过 --student-id 或 --student-name 明确选择上报对象")
+        if not args.location or not args.reason:
+            raise ValueError("上报必须提供 --location 和 --reason")
+        preview = admin.prepare(account, _day(args.date, cfg), targets, args.location, args.reason, args.remark)
+        payload = {"account": account["student_id"], "status": "preview", "preview": preview}
+        if args.submit:
+            result = admin.submit(account, preview["id"])
+            payload.update(status=result["status"], result=result)
+        _emit(args, payload)
+        return 0 if payload["status"] in {"preview", "acknowledged"} else 1
+    _emit(args, {"account": account["student_id"], "data": payload})
     return 0
 
 
-def cmd_plan_show(args: argparse.Namespace) -> int:
-    cfg, db, _, _, _ = _context()
-    day = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else datetime.now(cfg.tz).date()
-    plans = db.list_plans_for_date(day.isoformat())
-    if not plans:
-        print(f"{day.isoformat()} 还没有生成计划。")
-        return 0
-    users = {int(u["id"]): u for u in db.list_users()}
-    print(f"{day.isoformat()} 共 {len(plans)} 条计划：")
-    for plan in plans:
-        user = users.get(int(plan["user_id"]), {})
-        print(
-            f"  {plan['planned_time']}  {user.get('name', '?'):<12}  "
-            f"{plan['status']:<8} 尝试 {plan['attempts']} 次"
-            + (f"  {plan['last_error']}" if plan["last_error"] else "")
-        )
-    return 0
-
-
-def cmd_plan_regenerate(args: argparse.Namespace) -> int:
-    cfg, db, _, _, scheduler = _context()
-    day = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else datetime.now(cfg.tz).date()
-    removed = db.delete_pending_plans_for_date(day.isoformat())
-    # Noon gives the planner a stable "now" inside the target day.
-    scheduler.ensure_plans(datetime.combine(day, time(12, 0), tzinfo=cfg.tz))
-    plans = db.list_plans_for_date(day.isoformat())
-    print(f"已清除 {removed} 条待执行计划，{day.isoformat()} 现有 {len(plans)} 条。")
-    for plan in plans:
-        if plan["status"] in {"pending", "running"}:
-            print(f"  {plan['planned_time']}  {plan['status']}")
-    return 0
-
-
-def cmd_run(args: argparse.Namespace) -> int:
-    _, db, _, service, _ = _context()
-    user = _require_user(db, args.student_id)
-    if user is None:
-        return 1
-    outcome = service.test(user) if args.dry_run else service.run(user, manual=True)
-    payload = outcome.to_dict()
-    if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+def cmd_self(args: argparse.Namespace) -> int:
+    cfg, db, _, service, scheduler, _ = _context()
+    account = _require_account(db, args.account)
+    account_id = int(account["id"])
+    if args.action == "config":
+        fields = _configuration(args, cfg, account)
+        if fields:
+            db.update_user(account_id, **fields)
+            if "fingerprint" in fields and fields["fingerprint"] != account["fingerprint"]:
+                db.clear_session(account_id)
+            db.add_log(f"CLI 更新个人配置 {account['student_id']}：{', '.join(sorted(fields))}", user_id=account_id, user_name=account["name"], event="cli.self.config")
+            db.delete_pending_plan(account_id, _day(None, cfg))
+            if account["enabled"]:
+                scheduler.ensure_plans()
+        _emit(args, _public_account(db.get_user(account_id)))
+    elif args.action in {"enable", "disable"}:
+        enabled = args.action == "enable"
+        if enabled:
+            _validate_personal(account)
+        db.update_user(account_id, enabled=int(enabled))
+        db.add_log(f"CLI {'启用' if enabled else '停用'}个人自动打卡 {account['student_id']}", user_id=account_id, user_name=account["name"], event=f"cli.self.{args.action}")
+        if enabled:
+            scheduler.ensure_plans()
+        else:
+            db.delete_pending_plan(account_id, _day(None, cfg))
+        _emit(args, {"account": account["student_id"], "personal_enabled": enabled})
+    elif args.action == "status":
+        _emit(args, {"account": _public_account(account), "plans": [
+            plan for plan in db.list_plans_for_date(_day(None, cfg)) if int(plan["user_id"]) == account_id
+        ], "logs": db.list_logs(user_id=account_id, limit=10)})
     else:
-        label = "链路测试" if args.dry_run else "打卡"
-        print(f"{label}结果：{'成功' if outcome.ok else '失败'}")
-        print(f"  {outcome.message}")
-        if outcome.record_status:
-            print(f"  记录状态：{outcome.record_status}")
-        if outcome.detail:
-            summary = {
-                key: value
-                for key, value in outcome.detail.items()
-                if key in {"today", "schedule", "session_valid", "login_used", "location_count"}
-            }
-            if summary:
-                print("  详情：")
-                print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
-    return 0 if outcome.ok else 1
+        if args.submit:
+            _validate_personal(account)
+            now = datetime.now(cfg.tz)
+            if not PLATFORM_WINDOW_START <= now.time().replace(tzinfo=None) <= PLATFORM_WINDOW_END:
+                raise ValueError("实际个人打卡仅允许在平台时段 21:00–23:30 内执行")
+            outcome = service.run(account, manual=True)
+            if outcome.ok:
+                plan = db.get_plan(account_id, now.date().isoformat())
+                if plan is not None:
+                    db.update_plan(int(plan["id"]), status="success", next_attempt_epoch=None,
+                                   last_error="", result=json.dumps(outcome.to_dict(), ensure_ascii=False))
+            db.add_log(f"CLI 手动打卡：{outcome.message}", user_id=account_id, user_name=account["name"],
+                       level="INFO" if outcome.ok else ("ERROR" if outcome.fatal else "WARNING"),
+                       event="manual.checkin", detail=outcome.detail)
+        else:
+            outcome = service.test(account)
+        _emit(args, {"account": account["student_id"], "submitted": args.submit, **outcome.to_dict()})
+        return 0 if outcome.ok else 1
+    return 0
+
+
+def cmd_rule(args: argparse.Namespace) -> int:
+    _, db, _, _, _, admin = _context()
+    account = _require_account(db, args.account)
+    account_id = int(account["id"])
+    if args.action == "list":
+        payload = db.list_report_rules(account_id)
+    elif args.action == "jobs":
+        payload = db.list_report_jobs(account_id)
+    elif args.action == "add":
+        rule_id = admin.add_rule(account, args.student_id, args.location, args.reason, args.remark,
+                                 args.start_date, args.end_date, args.weekdays, args.run_time, enabled=not args.disabled)
+        payload = {"id": rule_id, "status": "created"}
+    else:
+        if not any(int(rule["id"]) == args.rule_id for rule in db.list_report_rules(account_id)):
+            raise ValueError("所选账号不存在该上报规则")
+        if args.action == "remove":
+            db.delete_report_rule(args.rule_id)
+        else:
+            db.set_report_rule_enabled(args.rule_id, args.action == "enable")
+        db.add_log(f"CLI {args.action} 上报规则 #{args.rule_id}（账号 {account['student_id']}）",
+                   user_id=account_id, user_name=account["name"], event=f"cli.rule.{args.action}")
+        payload = {"id": args.rule_id, "status": args.action}
+    _emit(args, {"account": account["student_id"], "data": payload})
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    cfg, db, _, _, scheduler, _ = _context()
+    day = _day(args.date, cfg)
+    if args.action == "regenerate":
+        db.delete_pending_plans_for_date(day)
+        scheduler.ensure_plans(datetime.combine(date.fromisoformat(day), time(12), tzinfo=cfg.tz))
+    _emit(args, {"date": day, "personal_plans": db.list_plans_for_date(day)})
+    return 0
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
     cfg = load_settings()
     setup_logging(cfg.log_level)
     import uvicorn
-
-    uvicorn.run(
-        "app.asgi:app",
-        host=args.host or cfg.host,
-        port=args.port or cfg.port,
-        log_level=(args.log_level or cfg.log_level).lower(),
-        proxy_headers=True,
-        forwarded_allow_ips="*",
-    )
+    uvicorn.run("app.asgi:app", host=args.host or cfg.host, port=args.port or cfg.port,
+                log_level=(args.log_level or cfg.log_level).lower(), proxy_headers=True, forwarded_allow_ips="*")
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    cfg, db, box, _, scheduler = _context()
-    print("UESTC 晚安成电 · 自动打卡 自检")
-    print(f"  版本        : {cfg.version}")
-    print(f"  数据目录    : {cfg.data_dir}")
-    print(f"  数据库      : {cfg.db_path}（{db.db_size()} 字节）")
-    print(f"  时区        : {cfg.tz_name}（当前 {datetime.now(cfg.tz).isoformat()}）")
-    print(f"  窗口        : {cfg.window_start.strftime('%H:%M')}–{cfg.window_end.strftime('%H:%M')}")
-    print(f"  平台时段    : 21:00–23:30")
-    print(f"  会话密钥    : {cfg.secret_source}")
-    print(f"  管理密码    : {'默认值（请修改）' if cfg.is_default_password else '已自定义'}")
-    print(f"  用户数      : {db.count_users()}")
-    today = datetime.now(cfg.tz).date().isoformat()
-    print(f"  今日计划    : {len(db.list_plans_for_date(today))} 条")
-    print(f"  调度器      : {'启用' if cfg.scheduler_enabled else '禁用'}")
-    ok = True
-    try:
-        probe = "self-check"
-        if box.decrypt(box.encrypt(probe)) != probe:
-            print("  加密自检    : 失败（解密结果不一致）")
-            ok = False
-        else:
-            print("  加密自检    : 通过")
-    except SecretMismatch as exc:
-        print(f"  加密自检    : 失败（{exc}）")
-        ok = False
-    if cfg.is_default_password:
-        ok = False
+    cfg, db, box, _, _, _ = _context()
+    encryption_ok = box.decrypt(box.encrypt("self-check")) == "self-check"
+    payload = {"version": cfg.version, "database": str(cfg.db_path), "database_bytes": db.db_size(),
+               "timezone": cfg.tz_name, "accounts": db.count_users(), "encryption_ok": encryption_ok,
+               "default_admin_password": cfg.is_default_password, "scheduler_enabled": cfg.scheduler_enabled}
+    ok = encryption_ok and not cfg.is_default_password
     if args.network:
-        print("  网络检查    : 正在访问统一身份认证登录页…")
         try:
             with UestcHttp(cfg.user_agent, timeout=cfg.http_timeout) as client:
-                page = fetch_login_page(client)
-            print(f"  网络检查    : 通过（execution {len(page.execution)} 字符，salt {len(page.salt)} 字符）")
-        except UestcError as exc:
-            print(f"  网络检查    : 失败（{exc}）")
+                fetch_login_page(client)
+            payload["network"] = "ok"
+        except Exception as exc:  # Diagnostics must describe network failures.
+            payload["network"] = str(exc)
             ok = False
-        except Exception as exc:  # noqa: BLE001 - diagnostics should not crash
-            print(f"  网络检查    : 失败（{type(exc).__name__}: {exc}）")
-            ok = False
+    _emit(args, payload)
     return 0 if ok else 1
 
 
-# ---------------------------------------------------------------------------
-# parser
-# ---------------------------------------------------------------------------
+def _output(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+
+def _acting(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--account", required=True, help="执行操作的大学账号学号（不是本地 ID）")
+    _output(parser)
+
+
+def _config_options(parser: argparse.ArgumentParser) -> None:
+    for name in ("fingerprint", "building", "room", "address", "window-start", "window-end", "notify-url", "notes"):
+        parser.add_argument("--" + name)
+    parser.add_argument("--lat", type=float)
+    parser.add_argument("--lng", type=float)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m app.cli",
-        description="UESTC 晚安成电自动打卡 · 管理与诊断工具",
-    )
-    sub = parser.add_subparsers(dest="command")
-
-    serve = sub.add_parser("serve", help="启动 Web 服务与后台调度器")
-    serve.add_argument("--host", default=None)
-    serve.add_argument("--port", type=int, default=None)
-    serve.add_argument("--log-level", default=None)
-    serve.set_defaults(func=cmd_serve)
-
-    user = sub.add_parser("user", help="用户管理")
-    user_sub = user.add_subparsers(dest="user_command", required=True)
-
-    add = user_sub.add_parser("add", help="新增用户")
-    add.add_argument("--name", required=True)
-    add.add_argument("--student-id", required=True)
-    add.add_argument("--password", default=None, help="省略则交互输入")
-    add.add_argument("--fingerprint", default=None)
-    add.add_argument("--building", default=None)
-    add.add_argument("--room", default=None)
-    add.add_argument("--address", default=None)
-    add.add_argument("--lat", type=float, required=True)
-    add.add_argument("--lng", type=float, required=True)
-    add.add_argument("--window-start", default=None)
-    add.add_argument("--window-end", default=None)
-    add.add_argument("--notify-url", default=None)
-    add.add_argument("--notes", default=None)
-    add.add_argument("--disabled", action="store_true")
-    add.set_defaults(func=cmd_user_add)
-
-    update = user_sub.add_parser("update", help="修改用户")
-    update.add_argument("student_id")
-    update.add_argument("--name")
-    update.add_argument("--password", default=None)
-    update.add_argument("--fingerprint")
-    update.add_argument("--building")
-    update.add_argument("--room")
-    update.add_argument("--address")
-    update.add_argument("--lat", type=float)
-    update.add_argument("--lng", type=float)
-    update.add_argument("--window-start")
-    update.add_argument("--window-end")
-    update.add_argument("--notify-url")
-    update.add_argument("--notes")
-    update.add_argument("--enable", action="store_true")
-    update.add_argument("--disable", action="store_true")
-    update.set_defaults(func=cmd_user_update)
-
-    listing = user_sub.add_parser("list", help="列出用户")
-    listing.set_defaults(func=cmd_user_list)
-
-    show = user_sub.add_parser("show", help="查看用户")
-    show.add_argument("student_id")
-    show.set_defaults(func=cmd_user_show)
-
-    remove = user_sub.add_parser("remove", help="删除用户")
-    remove.add_argument("student_id")
-    remove.add_argument("--yes", action="store_true")
-    remove.set_defaults(func=cmd_user_remove)
-
-    password = user_sub.add_parser("password", help="修改统一身份认证密码")
-    password.add_argument("student_id")
-    password.add_argument("--password", default=None)
-    password.set_defaults(func=cmd_user_password)
-
-    enable = user_sub.add_parser("enable", help="启用用户")
-    enable.add_argument("student_id")
-    enable.set_defaults(func=cmd_user_toggle, enable=True, disable=False)
-
-    disable = user_sub.add_parser("disable", help="停用用户")
-    disable.add_argument("student_id")
-    disable.set_defaults(func=cmd_user_toggle, enable=False, disable=True)
-
-    plan = sub.add_parser("plan", help="计划管理")
-    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
-    plan_show = plan_sub.add_parser("show", help="查看某日计划")
-    plan_show.add_argument("--date", default=None, help="YYYY-MM-DD，默认今天")
-    plan_show.set_defaults(func=cmd_plan_show)
-    plan_regen = plan_sub.add_parser("regenerate", help="重新随机某日计划")
-    plan_regen.add_argument("--date", default=None, help="YYYY-MM-DD，默认今天")
-    plan_regen.set_defaults(func=cmd_plan_regenerate)
-
-    run = sub.add_parser("run", help="立即执行一次打卡（或 --dry-run 只测试）")
-    run.add_argument("--student-id", required=True)
-    run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--json", action="store_true")
-    run.set_defaults(func=cmd_run)
-
-    doctor = sub.add_parser("doctor", help="自检")
-    doctor.add_argument("--network", action="store_true", help="额外检查学校登录页是否可达")
+    parser = argparse.ArgumentParser(prog="python -m app.cli", description="大学账号管理、班级上报与可选个人打卡")
+    groups = parser.add_subparsers(dest="command", required=True)
+    account = groups.add_parser("account", help="大学账号与凭据管理（默认不启用个人打卡）")
+    actions = account.add_subparsers(dest="action", required=True)
+    for action in ("add", "list", "show", "update", "remove", "password"):
+        command = actions.add_parser(action)
+        command.set_defaults(func=cmd_account)
+        if action in {"add", "list"}:
+            _output(command)
+        else:
+            _acting(command)
+        if action == "add":
+            command.add_argument("--student-id", required=True)
+            command.add_argument("--name", required=True)
+            command.add_argument("--personal-enabled", action="store_true")
+        elif action == "update":
+            command.add_argument("--name")
+        if action in {"add", "update"}:
+            _config_options(command)
+        if action in {"add", "password"}:
+            command.add_argument("--password", help="省略则安全交互输入")
+        if action == "remove":
+            command.add_argument("--yes", action="store_true")
+    for group in ("class", "student"):
+        commands = groups.add_parser(group).add_subparsers(dest="action", required=True)
+        command = commands.add_parser("list")
+        _acting(command)
+        command.add_argument("--refresh", action="store_true")
+        if group == "student":
+            command.add_argument("--date")
+            command.add_argument("--class-key", default="")
+            command.add_argument("--keyword", default="")
+        command.set_defaults(func=cmd_admin)
+    report = groups.add_parser("report", help="明确选择对象；默认预览，--submit 才实际上报")
+    _acting(report)
+    report.add_argument("--date")
+    report.add_argument("--class-key", default="")
+    report.add_argument("--student-id", action="append", default=[], help="目标学号，可重复")
+    report.add_argument("--student-name", action="append", default=[], help="目标姓名，必须唯一匹配；可重复")
+    report.add_argument("--location", default="")
+    report.add_argument("--reason", default="")
+    report.add_argument("--remark", default="")
+    mode = report.add_mutually_exclusive_group()
+    mode.add_argument("--options", action="store_true", help="读取学校上报选项")
+    mode.add_argument("--submit", action="store_true")
+    report.add_argument("--refresh", action="store_true")
+    report.set_defaults(func=cmd_admin)
+    personal = groups.add_parser("self", help="独立的可选个人打卡")
+    actions = personal.add_subparsers(dest="action", required=True)
+    for action in ("config", "enable", "disable", "run", "status"):
+        command = actions.add_parser(action)
+        _acting(command)
+        command.set_defaults(func=cmd_self)
+        if action == "config":
+            _config_options(command)
+        if action == "run":
+            command.add_argument("--submit", action="store_true", help="实际提交；默认只测试链路")
+    rules = groups.add_parser("rule").add_subparsers(dest="action", required=True)
+    for action in ("add", "list", "enable", "disable", "remove", "jobs"):
+        command = rules.add_parser(action)
+        _acting(command)
+        command.set_defaults(func=cmd_rule)
+        if action == "add":
+            for name in ("student-id", "location", "reason", "start-date", "end-date", "weekdays", "run-time"):
+                command.add_argument("--" + name, required=True)
+            command.add_argument("--remark", default="")
+            command.add_argument("--disabled", action="store_true")
+        elif action in {"enable", "disable", "remove"}:
+            command.add_argument("--rule-id", type=int, required=True)
+    plans = groups.add_parser("plan", help="个人打卡计划（上报任务见 rule jobs）").add_subparsers(dest="action", required=True)
+    for action in ("show", "regenerate"):
+        command = plans.add_parser(action)
+        command.add_argument("--date")
+        _output(command)
+        command.set_defaults(func=cmd_plan)
+    doctor = groups.add_parser("doctor")
+    doctor.add_argument("--network", action="store_true")
+    _output(doctor)
     doctor.set_defaults(func=cmd_doctor)
+    serve = groups.add_parser("serve")
+    serve.add_argument("--host")
+    serve.add_argument("--port", type=int)
+    serve.add_argument("--log-level")
+    serve.set_defaults(func=cmd_serve)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not getattr(args, "func", None):
-        parser.print_help()
-        return 2
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except (ValueError, DuplicateStudentId, UestcError, SecretMismatch) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False))
+        else:
+            print(f"错误：{exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

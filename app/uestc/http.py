@@ -42,7 +42,7 @@ class UestcHttp:
         *,
         headers: dict | None = None,
         data: dict | bytes | None = None,
-        json_body: dict | None = None,
+        json_body: dict | list[dict] | None = None,
         allow_redirects: bool = False,
         timeout: int | None = None,
     ) -> requests.Response:

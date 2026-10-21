@@ -28,11 +28,13 @@ class CheckinScheduler:
         *,
         rng: random.Random | None = None,
         max_workers: int = 4,
+        admin_service=None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.service = service
         self.notifier = notifier
+        self.admin_service = admin_service
         self._rng = rng or random.SystemRandom()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -45,6 +47,7 @@ class CheckinScheduler:
         self._tick_lock = threading.Lock()
         self.started_at: datetime | None = None
         self.last_tick: datetime | None = None
+        self._admin_future = None
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -54,6 +57,8 @@ class CheckinScheduler:
         if self._thread and self._thread.is_alive():
             return
         self.db.recover_running_plans()
+        if self.admin_service is not None:
+            self.db.recover_report_jobs()
         self.started_at = datetime.now(self.settings.tz)
         self._thread = threading.Thread(
             target=self._loop, name="checkin-scheduler", daemon=True
@@ -106,6 +111,11 @@ class CheckinScheduler:
         with self._tick_lock:
             now = datetime.now(self.settings.tz)
             self.last_tick = now
+            if self.admin_service is not None and (self._admin_future is None or self._admin_future.done()):
+                try:
+                    self._admin_future = self._executor.submit(self._run_admin_tick, now)
+                except RuntimeError:
+                    logger.warning('report dispatcher is shutting down')
             self._ensure_plans(now)
             self._expire(now)
             due = self.db.list_due_plans(int(now.timestamp()))
@@ -146,6 +156,12 @@ class CheckinScheduler:
                     )
                     continue
                 self._claim_and_submit(plan, user)
+
+    def _run_admin_tick(self, now):
+        try:
+            self.admin_service.tick(now)
+        except Exception:
+            logger.exception('administrator reporting tick failed')
 
     # -- plan generation ----------------------------------------------------
     def _ensure_plans(self, now: datetime) -> None:

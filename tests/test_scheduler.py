@@ -154,3 +154,26 @@ def test_expire_marks_yesterdays_and_todays_plans_failed(tmp_path):
         assert "窗口已结束" in current["last_error"]
     finally:
         scheduler._executor.shutdown(wait=True)
+
+
+def test_reporting_runs_with_no_enabled_personal_accounts(tmp_path):
+    import threading
+    settings, db, service, scheduler = make_env(tmp_path)
+    add_user(db, enabled=0)
+    entered, release = threading.Event(), threading.Event()
+    class Reporting:
+        def tick(self, now):
+            entered.set()
+            release.wait(5)
+            raise RuntimeError('isolated reporting failure')
+    scheduler.admin_service = Reporting()
+    try:
+        scheduler.tick()
+        assert entered.wait(2)
+        # Reporting is blocked, but personal scheduler ticks remain available.
+        scheduler.tick()
+        assert scheduler.status()['running'] == 0
+        assert db.list_plans_for_date(datetime.now(settings.tz).date().isoformat()) == []
+    finally:
+        release.set()
+        scheduler._executor.shutdown(wait=True)

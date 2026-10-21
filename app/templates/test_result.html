@@ -8,12 +8,12 @@
     <p class="muted">只读检查：登录、微应用授权、今日状态与打卡点。<strong>不会提交打卡。</strong></p>
   </div>
   <div class="head-actions">
-    <form method="post" action="/users/{{ user.id }}/test" class="inline-form">
+    <form method="post" action="/accounts/{{ user.id }}/test" class="inline-form">
       <input type="hidden" name="_csrf" value="{{ csrf }}">
       <button class="btn btn-sm" type="submit">重新测试</button>
     </form>
-    <a class="btn btn-sm btn-ghost" href="/users/{{ user.id }}/edit">编辑用户</a>
-    <a class="btn btn-sm btn-ghost" href="/">返回仪表盘</a>
+    <a class="btn btn-sm btn-ghost" href="/accounts/{{ user.id }}/edit">编辑账号</a>
+    <a class="btn btn-sm btn-ghost" href="/self?account_id={{ user.id }}">返回个人签到</a>
   </div>
 </section>
 
@@ -91,8 +91,8 @@
           <td class="mono tiny">{{ '%.6f'|format(loc.latitude) }}, {{ '%.6f'|format(loc.longitude) }}</td>
           <td class="mono tiny">{{ loc.radius_meter }} m</td>
           <td class="right">
-            <form method="post" action="/users/{{ user.id }}/apply-location" class="inline-form"
-                  onsubmit="return confirm('把“{{ loc.location_name }}”设为 {{ user.name }} 的打卡位置？')">
+            <form method="post" action="/accounts/{{ user.id }}/apply-location" class="inline-form"
+                  onsubmit="return confirm('把所选地点设为此账号的个人签到位置？')">
               <input type="hidden" name="_csrf" value="{{ csrf }}">
               <input type="hidden" name="latitude" value="{{ loc.latitude }}">
               <input type="hidden" name="longitude" value="{{ loc.longitude }}">

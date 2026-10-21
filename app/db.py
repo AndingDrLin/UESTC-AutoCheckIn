@@ -10,7 +10,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -81,6 +81,38 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS report_previews (
+    id TEXT PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    business_date TEXT NOT NULL,
+    entries TEXT NOT NULL,
+    expires_epoch INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    message TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS report_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL,
+    location TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    remark TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    weekdays TEXT NOT NULL,
+    run_time TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS report_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL REFERENCES report_rules(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    business_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    message TEXT NOT NULL DEFAULT '',
+    preview_id TEXT,
+    UNIQUE(rule_id, business_date)
+);
 """
 
 
@@ -101,6 +133,7 @@ class Database:
         self.path = str(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = threading.RLock()
+        self._account_locks: dict[int, threading.RLock] = {}
         self.init()
 
     # -- connection helpers -------------------------------------------------
@@ -123,6 +156,11 @@ class Database:
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(SCHEMA)
+
+    def account_lock(self, account_id: int):
+        """Serialize authentication and writes for the same university account."""
+        with self._write_lock:
+            return self._account_locks.setdefault(account_id, threading.RLock())
 
     # -- users --------------------------------------------------------------
     _USER_FIELDS = {
@@ -548,3 +586,135 @@ class Database:
             return Path(self.path).stat().st_size
         except OSError:
             return 0
+
+    # -- administrator reporting --------------------------------------------
+    def save_report_preview(self, preview: dict, expires_epoch: int) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute(
+                "INSERT INTO report_previews (id, account_id, business_date, entries, expires_epoch) VALUES (?, ?, ?, ?, ?)",
+                (preview['id'], preview['account_id'], preview['business_date'],
+                 json.dumps(preview['entries'], ensure_ascii=False), expires_epoch),
+            )
+
+    def claim_report_preview(self, preview_id: str, account_id: int, now_epoch: int) -> dict:
+        with self._write_lock, self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM report_previews WHERE id = ?', (preview_id,)).fetchone()
+            if row is None or row['account_id'] != account_id:
+                raise ValueError('预览不存在或不属于当前账号')
+            if row['status'] != 'pending':
+                raise ValueError('预览已使用，禁止重复提交')
+            if row['expires_epoch'] <= now_epoch:
+                raise ValueError('预览已过期，请重新预览')
+            conn.execute("UPDATE report_previews SET status = 'claimed' WHERE id = ?", (preview_id,))
+            result = dict(row)
+            result['entries'] = json.loads(result['entries'])
+            return result
+
+    def finish_report_preview(self, preview_id: str, status: str, message: str) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute('UPDATE report_previews SET status = ?, message = ? WHERE id = ?',
+                         (status, message, preview_id))
+
+    @staticmethod
+    def validate_report_rule(student_id, location, reason, start_date, end_date, weekdays, run_time):
+        if not isinstance(student_id, str) or not student_id.strip() or not location or not reason or not str(location).strip() or not str(reason).strip():
+            raise ValueError('学号、情况类型及关键词不能为空')
+        start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        if start.isoformat() != start_date or end.isoformat() != end_date or start > end:
+            raise ValueError('日期范围无效')
+        days = {int(day.strip()) for day in weekdays.split(',')}
+        if not days or not days <= set(range(1, 8)):
+            raise ValueError('星期必须为 1 到 7')
+        parsed = datetime.strptime(run_time, '%H:%M')
+        if parsed.strftime('%H:%M') != run_time:
+            raise ValueError('运行时间必须为 HH:MM')
+        return ','.join(str(day) for day in sorted(days))
+
+    @staticmethod
+    def _reject_report_overlap(conn, candidate: dict, exclude_id: int = 0) -> None:
+        if not candidate['enabled']:
+            return
+        for row in conn.execute('SELECT * FROM report_rules WHERE enabled = 1 AND student_id = ? AND id != ?',
+                                (candidate['student_id'], exclude_id)):
+            start = max(date.fromisoformat(row['start_date']), date.fromisoformat(candidate['start_date']))
+            end = min(date.fromisoformat(row['end_date']), date.fromisoformat(candidate['end_date']))
+            days = set(row['weekdays'].split(',')) & set(candidate['weekdays'].split(','))
+            for offset in range(min(7, max(0, (end - start).days + 1))):
+                if str((start + timedelta(days=offset)).isoweekday()) in days:
+                    raise ValueError(f"与规则 #{row['id']} 重叠：同一学生不可重复安排（包括其他账号）")
+
+    def create_report_rule(self, account_id: int, student_id: str, location: str, reason: str,
+                           remark: str, start_date: str, end_date: str, weekdays: str,
+                           run_time: str, enabled: bool = True) -> int:
+        weekdays = self.validate_report_rule(student_id, location, reason, start_date, end_date, weekdays, run_time)
+        student_id = student_id.strip()
+        values = dict(account_id=account_id, student_id=student_id, location=location, reason=reason,
+                      remark=remark, start_date=start_date, end_date=end_date, weekdays=weekdays,
+                      run_time=run_time, enabled=int(enabled))
+        with self._write_lock, self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            self._reject_report_overlap(conn, values)
+            cur = conn.execute(f"INSERT INTO report_rules ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})",
+                               tuple(values.values()))
+            return int(cur.lastrowid)
+
+    def update_report_rule(self, rule_id: int, account_id: int, student_id: str, location: str,
+                           reason: str, remark: str, start_date: str, end_date: str,
+                           weekdays: str, run_time: str, enabled: bool = True) -> None:
+        weekdays = self.validate_report_rule(student_id, location, reason, start_date, end_date, weekdays, run_time)
+        student_id = student_id.strip()
+        values = dict(student_id=student_id, location=location, reason=reason, remark=remark,
+                      start_date=start_date, end_date=end_date, weekdays=weekdays,
+                      run_time=run_time, enabled=int(enabled))
+        with self._write_lock, self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT id FROM report_rules WHERE id = ? AND account_id = ?',
+                            (rule_id, account_id)).fetchone() is None:
+                raise ValueError('规则不存在或不属于当前账号')
+            self._reject_report_overlap(conn, values, rule_id)
+            conn.execute(f"UPDATE report_rules SET {', '.join(key + ' = ?' for key in values)} WHERE id = ?",
+                         (*values.values(), rule_id))
+
+    def list_report_rules(self, account_id: int | None = None) -> list[dict]:
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(
+                'SELECT * FROM report_rules' + (' WHERE account_id = ?' if account_id is not None else '') + ' ORDER BY id',
+                (account_id,) if account_id is not None else ())]
+
+    def set_report_rule_enabled(self, rule_id: int, enabled: bool) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM report_rules WHERE id = ?', (rule_id,)).fetchone()
+            if row is None:
+                raise ValueError('规则不存在')
+            candidate = dict(row, enabled=int(enabled))
+            self._reject_report_overlap(conn, candidate, rule_id)
+            conn.execute('UPDATE report_rules SET enabled = ? WHERE id = ?', (int(enabled), rule_id))
+
+    def delete_report_rule(self, rule_id: int) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute('DELETE FROM report_rules WHERE id = ?', (rule_id,))
+
+    def list_report_jobs(self, account_id: int | None = None) -> list[dict]:
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(
+                'SELECT * FROM report_jobs' + (' WHERE account_id = ?' if account_id is not None else '') + ' ORDER BY id DESC',
+                (account_id,) if account_id is not None else ())]
+
+    def claim_report_job(self, rule_id: int, account_id: int, business_date: str) -> int | None:
+        with self._write_lock, self.connect() as conn:
+            cur = conn.execute("INSERT OR IGNORE INTO report_jobs (rule_id, account_id, business_date, status) VALUES (?, ?, ?, 'running')",
+                               (rule_id, account_id, business_date))
+            return int(cur.lastrowid) if cur.rowcount else None
+
+    def finish_report_job(self, job_id: int, status: str, message: str, preview_id: str | None = None) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute('UPDATE report_jobs SET status = ?, message = ?, preview_id = ? WHERE id = ?',
+                         (status, message, preview_id, job_id))
+
+    def recover_report_jobs(self) -> int:
+        with self._write_lock, self.connect() as conn:
+            cur = conn.execute("UPDATE report_jobs SET status = 'uncertain', message = '进程中断，结果不确定；请人工核对，禁止自动重试' WHERE status IN ('running', 'writing')")
+            conn.execute("UPDATE report_previews SET status = 'uncertain', message = '进程中断，请人工核对' WHERE status IN ('claimed', 'writing')")
+            return cur.rowcount

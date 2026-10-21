@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -39,6 +39,7 @@ from .security import (
     verify_session,
 )
 from .uestc.errors import ServiceError
+from .uestc.admin_service import AdminService
 from .uestc.service import CheckinService, Outcome
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,14 @@ def _parse_float(value: str) -> float | None:
     return number
 
 
+def personal_coordinates_valid(account: dict) -> bool:
+    latitude = _parse_float(account.get("latitude"))
+    longitude = _parse_float(account.get("longitude"))
+    return bool(latitude is not None and longitude is not None
+                and -90 <= latitude <= 90 and -180 <= longitude <= 180
+                and latitude != 0 and longitude != 0)
+
+
 def validate_user_fields(raw: dict[str, str], *, require_password: bool) -> tuple[dict, str, list[str]]:
     """Validate an HTML form.  Returns (typed fields, plain password, errors)."""
     errors: list[str] = []
@@ -141,14 +150,15 @@ def validate_user_fields(raw: dict[str, str], *, require_password: bool) -> tupl
     if fingerprint and (len(fingerprint) != 32 or any(c not in "0123456789ABCDEF" for c in fingerprint)):
         errors.append("浏览器指纹应为 32 位十六进制字符（0–9 / A–F）")
 
-    latitude = _parse_float(raw.get("latitude", ""))
-    longitude = _parse_float(raw.get("longitude", ""))
+    personal_enabled = str(raw.get("enabled", "0")) in ("1", "on", "true", "yes")
+    latitude = _parse_float(raw.get("latitude") or "0")
+    longitude = _parse_float(raw.get("longitude") or "0")
     if latitude is None or not (-90 <= latitude <= 90):
         errors.append("纬度应为 -90 到 90 之间的数字")
     if longitude is None or not (-180 <= longitude <= 180):
         errors.append("经度应为 -180 到 180 之间的数字")
-    if latitude is not None and longitude is not None and abs(latitude) < 1e-9 and abs(longitude) < 1e-9:
-        errors.append("请填写真实的宿舍坐标（0,0 不是有效位置）")
+    if personal_enabled and (latitude == 0 or longitude == 0):
+        errors.append("启用个人自动签到前请填写真实宿舍坐标")
 
     window_start = None
     window_end = None
@@ -188,7 +198,7 @@ def validate_user_fields(raw: dict[str, str], *, require_password: bool) -> tupl
         "window_end": window_end.strftime("%H:%M"),
         "notify_url": notify_url[:500],
         "notes": notes,
-        "enabled": 1,
+        "enabled": int(personal_enabled),
     }
     return fields, password, []
 
@@ -200,6 +210,7 @@ def _safe_session_info(row: dict | None) -> dict | None:
         "saved_at": row.get("saved_at"),
         "last_login_epoch": row.get("last_login_epoch"),
         "last_warmup_epoch": row.get("last_warmup_epoch"),
+        "last_checked_epoch": row.get("last_warmup_epoch"),
         "invalid": bool(row.get("invalid")),
         "logins_date": row.get("logins_date"),
         "logins_today": row.get("logins_today"),
@@ -217,7 +228,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     box = SecretBox(cfg.app_secret)
     notifier = Notifier(cfg)
     service = CheckinService(cfg, db, box, notifier)
-    scheduler = CheckinScheduler(cfg, db, service, notifier)
+    admin_service = AdminService(cfg, db, box, notifier)
+    scheduler = CheckinScheduler(cfg, db, service, notifier, admin_service=admin_service)
 
     templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
     templates.env.filters["localtime"] = lambda value: (
@@ -297,6 +309,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.box = box
     app.state.service = service
     app.state.scheduler = scheduler
+    app.state.admin_service = admin_service
 
     static_dir = BASE_DIR / "app" / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
@@ -345,17 +358,164 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.delete_cookie(SESSION_COOKIE, path="/")
         return response
 
-    # -- dashboard ----------------------------------------------------------
+    def selected_account(account_id: int) -> dict:
+        account = db.get_user(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        return account
+
+    @app.get("/accounts", response_class=HTMLResponse)
+    def accounts_page(request: Request, auth: dict = Depends(require_admin), msg: str = "", level: str = "ok"):
+        rows = [{"account": public_user(u), "session_info": _safe_session_info(db.get_session(int(u["id"])))} for u in db.list_users()]
+        return render(request, "accounts.html", auth=auth, rows=rows, msg=msg, level=level)
+
+    @app.post("/accounts/{account_id}/session/clear")
+    def clear_account_session(account_id: int, auth: dict = Depends(require_admin), csrf: str = Form("", alias="_csrf")):
+        check_csrf(auth, csrf)
+        account = selected_account(account_id)
+        db.clear_session(account_id)
+        db.add_log("管理员清除账号缓存会话", user_id=account_id, user_name=account['name'],
+                   event="account.session.clear", detail={"account_id": account_id})
+        return redirect_with("/accounts", "已清除本地缓存会话；下次操作将重新登录")
+
     @app.get("/", response_class=HTMLResponse)
+    async def workspace(request: Request, auth: dict = Depends(require_admin), account_id: int | None = None,
+                        business_date: str = "", class_key: str = "", keyword: str = "", location: str = "",
+                        refresh: bool = False, msg: str = "", level: str = "ok"):
+        business_date = business_date or datetime.now(cfg.tz).date().isoformat()
+        account = selected_account(account_id) if account_id is not None else None
+        classes, roster, options = [], [], {"types": [], "keywords": []}
+        refreshed_at = "—"
+        if account:
+            try:
+                classes = await run_in_threadpool(admin_service.classes, account, refresh)
+                roster = await run_in_threadpool(admin_service.roster, account, business_date, class_key, keyword, refresh)
+                options = await run_in_threadpool(admin_service.options, account, location, refresh)
+                refreshed_at = datetime.now(cfg.tz).strftime("%Y-%m-%d %H:%M:%S")
+            except ServiceError as exc:
+                msg, level = str(exc), "error"
+        return render(request, "workspace.html", auth=auth, accounts=[public_user(u) for u in db.list_users()],
+                      account=public_user(account) if account else None, business_date=business_date,
+                      class_key=class_key, keyword=keyword, location=location, classes=classes, roster=roster,
+                      options=options, refreshed_at=refreshed_at, msg=msg, level=level)
+
+    @app.get("/accounts/{account_id}/options")
+    async def report_options(account_id: int, location: str = "", auth: dict = Depends(require_api_admin)):
+        try:
+            return await run_in_threadpool(admin_service.options, selected_account(account_id), location)
+        except ServiceError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @app.post("/reports/preview", response_class=HTMLResponse)
+    async def report_preview(request: Request, auth: dict = Depends(require_admin)):
+        form = await request.form()
+        check_csrf(auth, str(form.get("_csrf", "")))
+        try:
+            account_id = int(str(form.get("account_id", "")))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="请选择操作账号")
+        account = selected_account(account_id)
+        try:
+            targets = [json.loads(str(value)) for value in form.getlist("targets")]
+            if not targets or any(not isinstance(target, dict) for target in targets):
+                raise ValueError("请显式勾选至少一名学生")
+            preview = await run_in_threadpool(admin_service.prepare, account, str(form.get("business_date", "")),
+                                             targets, str(form.get("location", "")), str(form.get("reason", "")), str(form.get("remark", "")))
+        except (ServiceError, ValueError, TypeError) as exc:
+            query = urlencode({"account_id": account_id, "business_date": str(form.get("business_date", ""))})
+            return redirect_with(f"/?{query}", str(exc), "error")
+        return render(request, "report_preview.html", auth=auth, account=public_user(account), preview=preview)
+
+    @app.post("/reports/submit", response_class=HTMLResponse)
+    async def report_submit(request: Request, auth: dict = Depends(require_admin), csrf: str = Form("", alias="_csrf"),
+                            account_id: int = Form(...), preview_id: str = Form(...)):
+        check_csrf(auth, csrf)
+        account = selected_account(account_id)
+        try:
+            result = await run_in_threadpool(admin_service.submit, account, preview_id)
+        except ServiceError as exc:
+            return redirect_with(f"/?account_id={account_id}", str(exc), "error")
+        return render(request, "report_result.html", auth=auth, account=public_user(account), result=result)
+
+    @app.get("/rules", response_class=HTMLResponse)
+    def rules_page(request: Request, auth: dict = Depends(require_admin), account_id: int | None = None, msg: str = "", level: str = "ok"):
+        account = selected_account(account_id) if account_id is not None else None
+        return render(request, "rules.html", auth=auth, accounts=[public_user(u) for u in db.list_users()],
+                      account=public_user(account) if account else None,
+                      rules=db.list_report_rules(account_id) if account else [],
+                      jobs=db.list_report_jobs(account_id) if account else [], msg=msg, level=level)
+
+    @app.post("/rules")
+    async def rule_create(request: Request, auth: dict = Depends(require_admin)):
+        form = await request.form()
+        check_csrf(auth, str(form.get("_csrf", "")))
+        try:
+            account_id = int(str(form.get("account_id", "")))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="请选择操作账号")
+        account = selected_account(account_id)
+        try:
+            await run_in_threadpool(admin_service.add_rule, account,
+                *[str(form.get(key, "")) for key in ("student_id", "location", "reason", "remark", "start_date", "end_date", "weekdays", "run_time")],
+                str(form.get("enabled", "0")) == "1")
+            scheduler.wake()
+        except (ServiceError, ValueError) as exc:
+            return redirect_with(f"/rules?account_id={account_id}", str(exc), "error")
+        return redirect_with(f"/rules?account_id={account_id}", "规则已保存")
+
+    @app.post("/rules/{rule_id}/edit")
+    async def rule_update(rule_id: int, request: Request, auth: dict = Depends(require_admin)):
+        form = await request.form()
+        check_csrf(auth, str(form.get("_csrf", "")))
+        try:
+            account_id = int(str(form.get("account_id", "")))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="请选择操作账号")
+        account = selected_account(account_id)
+        try:
+            await run_in_threadpool(admin_service.update_rule, account, rule_id,
+                *[str(form.get(key, "")) for key in ("student_id", "location", "reason", "remark", "start_date", "end_date", "weekdays", "run_time")],
+                str(form.get("enabled", "0")) == "1")
+            scheduler.wake()
+        except (ServiceError, ValueError) as exc:
+            return redirect_with(f"/rules?account_id={account_id}", str(exc), "error")
+        return redirect_with(f"/rules?account_id={account_id}", "规则已保存")
+
+    @app.post("/rules/{rule_id}/{action}")
+    def rule_action(rule_id: int, action: str, auth: dict = Depends(require_admin), csrf: str = Form("", alias="_csrf"), account_id: int = Form(...)):
+        check_csrf(auth, csrf)
+        account = selected_account(account_id)
+        rule = next((r for r in db.list_report_rules(account_id) if int(r["id"]) == rule_id), None)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="该账号下规则不存在")
+        try:
+            if action == "delete":
+                db.delete_report_rule(rule_id)
+            elif action == "toggle":
+                db.set_report_rule_enabled(rule_id, not bool(rule["enabled"]))
+            else:
+                raise HTTPException(status_code=404, detail="操作不存在")
+            db.add_log(f"账号 {account['student_id']} {'删除' if action == 'delete' else '切换启用状态'}上报规则 #{rule_id}",
+                       user_id=account_id, user_name=account['name'], event=f"report.rule.{action}",
+                       detail={"account_id": account_id, "rule_id": rule_id})
+            scheduler.wake()
+        except (ServiceError, ValueError) as exc:
+            return redirect_with(f"/rules?account_id={account_id}", str(exc), "error")
+        return redirect_with(f"/rules?account_id={account_id}", "规则已更新")
+
+    # -- dashboard ----------------------------------------------------------
+    @app.get("/self", response_class=HTMLResponse)
     def dashboard(
         request: Request,
         auth: dict = Depends(require_admin),
         msg: str = "",
         level: str = "ok",
+        account_id: int | None = None,
     ):
         now = datetime.now(cfg.tz)
         date_str = now.date().isoformat()
-        users = db.list_users()
+        accounts = db.list_users()
+        users = [u for u in accounts if account_id is None or int(u["id"]) == account_id]
         plans = {int(p["user_id"]): p for p in db.list_plans_for_date(date_str)}
         rows: list[dict] = []
         for user in users:
@@ -378,7 +538,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "planned_time": plan["planned_time"] if plan else "—",
                     "last_error": (plan or {}).get("last_error", ""),
                     "session_info": _safe_session_info(db.get_session(int(user["id"]))),
-                    "can_checkin": bool(user["enabled"]) and platform_is_open(now),
+                    "can_checkin": personal_coordinates_valid(user) and platform_is_open(now),
                 }
             )
 
@@ -406,6 +566,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             msg=msg,
             level=level,
             rows=rows,
+            accounts=[public_user(u) for u in accounts],
+            selected_account=account_id,
             stats=stats,
             next_row=next_row,
             today_label=f"{now.strftime('%Y-%m-%d')} {WEEKDAYS[now.weekday()]}",
@@ -431,11 +593,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "window_end": cfg.window_end.strftime("%H:%M"),
             "notify_url": "",
             "notes": "",
-            "enabled": 1,
+            "enabled": 0,
             "has_password": False,
         }
 
-    @app.get("/users/new", response_class=HTMLResponse)
+    @app.get("/accounts/new", response_class=HTMLResponse)
     def user_new(request: Request, auth: dict = Depends(require_admin)):
         return render(
             request,
@@ -444,10 +606,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             mode="new",
             user=_new_user_defaults(),
             errors=[],
-            action="/users/new",
+            action="/accounts/new",
         )
 
-    @app.post("/users/new", response_class=HTMLResponse)
+    @app.post("/accounts/new", response_class=HTMLResponse)
     def user_create(
         request: Request,
         auth: dict = Depends(require_admin),
@@ -482,6 +644,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "window_end": window_end,
             "notify_url": notify_url,
             "notes": notes,
+            "enabled": enabled,
         }
         fields, plain_password, errors = validate_user_fields(
             raw, require_password=True
@@ -501,7 +664,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     event="user.create",
                 )
                 scheduler.wake()
-                return redirect_with("/", f"已添加 {fields['name']}，今晚将自动安排打卡")
+                return redirect_with("/accounts", f"已添加账号 {fields['name']}；个人自动签到仅在明确启用后执行")
         form_user = {"id": None, **raw, "enabled": 1 if enabled in ("1", "on", "true", "yes") else 0}
         return render(
             request,
@@ -510,11 +673,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             mode="new",
             user=form_user,
             errors=errors,
-            action="/users/new",
+            action="/accounts/new",
             status_code=400,
         )
 
-    @app.get("/users/{user_id}/edit", response_class=HTMLResponse)
+    @app.get("/accounts/{user_id}/edit", response_class=HTMLResponse)
     def user_edit(user_id: int, request: Request, auth: dict = Depends(require_admin)):
         user = db.get_user(user_id)
         if user is None:
@@ -526,10 +689,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             mode="edit",
             user=public_user(user),
             errors=[],
-            action=f"/users/{user_id}/edit",
+            action=f"/accounts/{user_id}/edit",
         )
 
-    @app.post("/users/{user_id}/edit", response_class=HTMLResponse)
+    @app.post("/accounts/{user_id}/edit", response_class=HTMLResponse)
     def user_update(
         user_id: int,
         request: Request,
@@ -567,6 +730,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "window_start": window_start,
             "window_end": window_end,
             "notify_url": notify_url,
+            "enabled": enabled,
             "notes": notes,
         }
         fields, plain_password, errors = validate_user_fields(
@@ -593,7 +757,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     event="user.update",
                 )
                 scheduler.wake()
-                return redirect_with("/", f"已保存 {fields['name']} 的配置")
+                return redirect_with("/accounts", f"已保存 {fields['name']} 的配置")
         form_user = {
             "id": user_id,
             **raw,
@@ -607,11 +771,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             mode="edit",
             user=form_user,
             errors=errors,
-            action=f"/users/{user_id}/edit",
+            action=f"/accounts/{user_id}/edit",
             status_code=400,
         )
 
-    @app.post("/users/{user_id}/delete")
+    @app.post("/accounts/{user_id}/delete")
     def user_delete(
         user_id: int,
         auth: dict = Depends(require_admin),
@@ -628,9 +792,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_name=user["name"],
             event="user.delete",
         )
-        return redirect_with("/", f"已删除 {user['name']} 及其计划")
+        return redirect_with("/accounts", f"已删除 {user['name']} 及其计划")
 
-    @app.post("/users/{user_id}/toggle")
+    @app.post("/accounts/{user_id}/toggle")
     def user_toggle(
         user_id: int,
         auth: dict = Depends(require_admin),
@@ -641,6 +805,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if user is None:
             raise HTTPException(status_code=404, detail="用户不存在")
         new_value = 0 if int(user["enabled"]) else 1
+        if new_value and not personal_coordinates_valid(user):
+            return redirect_with(f"/accounts/{user_id}/edit", "启用个人自动签到前请填写真实宿舍坐标", "error")
         db.update_user(user_id, enabled=new_value)
         if not new_value:
             today = datetime.now(cfg.tz).date().isoformat()
@@ -653,10 +819,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_name=user["name"],
             event="user.toggle",
         )
-        return redirect_with("/", f"已{'启用' if new_value else '停用'} {user['name']}")
+        return redirect_with(f"/self?account_id={user_id}", f"已{'启用' if new_value else '停用'} {user['name']} 的个人自动签到")
 
     # -- check-in actions ---------------------------------------------------
-    @app.post("/users/{user_id}/checkin")
+    @app.post("/accounts/{user_id}/checkin")
     async def manual_checkin(
         user_id: int,
         request: Request,
@@ -667,12 +833,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         user = db.get_user(user_id)
         if user is None:
             raise HTTPException(status_code=404, detail="用户不存在")
-        if not int(user["enabled"]):
-            return redirect_with("/", "该用户已停用", "error")
+        if not personal_coordinates_valid(user):
+            return redirect_with(f"/accounts/{user_id}/edit", "手动签到前请填写真实宿舍坐标", "error")
         now = datetime.now(cfg.tz)
         if not platform_is_open(now):
             return redirect_with(
-                "/",
+                "/self",
                 f"当前不在平台打卡时段（{PLATFORM_WINDOW_START.strftime('%H:%M')}–"
                 f"{PLATFORM_WINDOW_END.strftime('%H:%M')}），已拒绝提交",
                 "error",
@@ -697,9 +863,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             detail=outcome.detail,
         )
         level = "ok" if outcome.ok else ("error" if outcome.fatal else "warn")
-        return redirect_with("/", f"{user['name']}：{outcome.message}", level)
+        return redirect_with(f"/self?account_id={user_id}", f"{user['name']}：{outcome.message}", level)
 
-    @app.post("/users/{user_id}/test", response_class=HTMLResponse)
+    @app.post("/accounts/{user_id}/test", response_class=HTMLResponse)
     async def user_test(
         user_id: int,
         request: Request,
@@ -721,7 +887,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             locations=(outcome.detail or {}).get("locations", []),
         )
 
-    @app.post("/users/{user_id}/locations")
+    @app.post("/accounts/{user_id}/locations")
     async def user_locations(
         user_id: int,
         request: Request,
@@ -743,7 +909,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=500,
             )
 
-    @app.post("/users/{user_id}/apply-location")
+    @app.post("/accounts/{user_id}/apply-location")
     def apply_location(
         user_id: int,
         auth: dict = Depends(require_admin),
@@ -760,7 +926,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lat = _parse_float(latitude)
         lng = _parse_float(longitude)
         if lat is None or lng is None or not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
-            return redirect_with(f"/users/{user_id}/edit", "坐标无效", "error")
+            return redirect_with(f"/accounts/{user_id}/edit", "坐标无效", "error")
         db.update_user(
             user_id,
             latitude=round(lat, 6),
@@ -777,7 +943,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_name=user["name"],
             event="user.location",
         )
-        return redirect_with(f"/users/{user_id}/edit", "已更新打卡点坐标")
+        return redirect_with(f"/accounts/{user_id}/edit", "已更新打卡点坐标")
 
     # -- logs ---------------------------------------------------------------
     @app.get("/logs", response_class=HTMLResponse)
@@ -847,7 +1013,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             event="plans.regenerate",
         )
         return redirect_with(
-            "/", f"已清除 {removed} 条待执行计划，调度器将在数秒内重新随机安排"
+            "/self", f"已清除 {removed} 条待执行计划，调度器将在数秒内重新随机安排"
         )
 
     # -- health -------------------------------------------------------------

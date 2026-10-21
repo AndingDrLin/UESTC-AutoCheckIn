@@ -2,9 +2,9 @@
 
 # 🌙 UESTC AutoCheckIn
 
-**电子科技大学「晚安成电」自动打卡 · 一次部署，从此告别 21:30 的手机闹钟**
+**电子科技大学「晚安成电」班级管理工作台与个人签到工具**
 
-在 Docker 中稳定运行的自动签到服务：模拟真实浏览器完成统一身份认证、门户预热与 H5 打卡，每天在 **21:30–23:00** 之间随机选择一个时间自动提交。
+一个服务管理多个学校账号：按账号查看可管理班级、按学号或姓名预览并提交情况上报、配置明确的学生上报规则；同一账号也可使用学生接口完成自己的签到。个人自动签到是独立的可选功能，新账号默认关闭。
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
@@ -19,34 +19,31 @@
 ---
 
 > [!IMPORTANT]
-> 本项目通过模拟浏览器请求完成打卡，**不是学校官方客户端**。请只用于自己的账号，并先阅读文末的[使用边界与风险](#-使用边界与风险)。学校可能随时调整接口、加密方式或风控策略，由此产生的后果由使用者自行承担。
+> 本项目通过模拟浏览器请求完成操作，**不是学校官方客户端**。仅使用本人账号及学校明确授权的班级管理权限，先阅读文末的[使用边界与风险](#-使用边界与风险)。学校可能随时调整接口、加密方式或风控策略，由此产生的后果由使用者自行承担。
 
 ## 📖 项目简介
 
-「晚安成电」要求学生在每晚的规定时段内完成签到。手动打卡意味着每天要在固定时间掏出手机、登录、找到微应用、再点一次提交；一旦在图书馆、实验室或外面忙起来，很容易错过。
+「晚安成电」的班干部账号既需要管理班级，也可能需要完成本人的学生签到。本项目将两种操作分开，复用同一账号的加密凭据和会话：
 
-**UESTC AutoCheckIn** 把这套流程完整地搬进了容器：
+- **班级工作台**：按操作账号、日期和班级查询记录，选择具体学生，预览后提交情况上报。
+- **上报规则**：以学生学号为目标，指定日期范围、星期、执行时间、情况和原因，不把同名学生或整个班级隐式作为目标。
+- **我的签到**：使用学生接口执行本人签到，可单独开启随机计划；成功仍以回读 `CHECKED_IN` 为准。
+- **账号与会话**：学校账号各自保存 CAS 凭据、指纹和加密会话；被管理学生不需要提供密码。
 
-- 每天在窗口内**随机**选一个时间，而不是卡点提交；
-- 到点自动完成统一身份认证（CAS）登录、门户预热、微应用跳转、状态读取与提交；
-- 提交后**回读今日记录**，只有平台确认 `CHECKED_IN` 才算成功；
-- 失败按退避策略重试，并通过 ServerChan / Webhook 告诉你；
-- 提供一个本地 Web 后台，用户、坐标、计划、日志、手动打卡都能可视化操作。
-
-它是单个 Python 服务，依赖少、启动快，一条 `docker compose up -d` 即可长期运行。
+控制台继续使用一个 `ADMIN_PASSWORD`，不是多操作员权限系统。学校班干部权限由学校接口决定，本地无法授予。多学校账号可以共存，任何操作都绑定一个明确账号，不会在失败时自动切换账号。
 
 ## ✨ 功能特性
 
 | | 特性 | 说明 |
 | :---: | --- | --- |
-| 🗓️ | **随机调度** | 每位用户在 21:30–23:00 内随机一个时间，多用户之间自动错开 30 秒；计划落库，重启容器不会重新随机。 |
-| 🔁 | **自动重试** | 网络抖动、会话失效、门户未授权等临时问题按 1x / 1.5x / 2x 退避重试，直到窗口结束或达到次数上限。 |
+| 🗓️ | **个人随机调度** | 仅为明确启用个人自动签到的账号在窗口内生成持久计划，默认 21:30–23:00，多账号错开 30 秒。 |
+| 🔁 | **个人签到重试** | 个人签到按退避策略重试；情况上报写请求结果不明时不盲目重发。 |
 | 🔐 | **会话复用** | 登录成功后加密保存 `SESSION`，后续优先复用，减少登录次数与二次验证风险。 |
 | 🧬 | **浏览器指纹** | 保存 `MULTIFACTOR_BROWSER_FINGERPRINT` 后，学校会把账号视为可信设备，通常不再要求手机验证。 |
 | ✅ | **结果可核对** | 提交后回读 `today`，以 `recordStatusCode == CHECKED_IN` 作为唯一成功标准，并展示打卡时间与异常标记。 |
-| 👥 | **多用户** | 一个实例管理多个账号，每人独立的宿舍、坐标、时间窗口、通知地址与启停状态。 |
-| 🖥️ | **Web 管理后台** | 仪表盘、用户增删改、链路测试、地图选点、运行日志、手动打卡、计划重新随机。 |
-| ⌨️ | **CLI** | `doctor` / `user` / `plan` / `run` / `serve`，方便无头服务器与自动化运维。 |
+| 👥 | **多学校账号** | 每个账号独立凭据、会话、可管理班级和可选个人签到；被管理学生无需密码。 |
+| 🖥️ | **Web 管理后台** | 班级查询、明确选人、上报预览/提交、定时规则、本人签到、账号与日志。 |
+| ⌨️ | **CLI** | `account` / `class` / `student` / `report` / `self` / `rule` / `plan` / `doctor` / `serve`。 |
 | 🔔 | **通知** | 支持 ServerChan 或任意 JSON Webhook，成功 / 失败 / 需要人工处理时推送。 |
 | 🐳 | **开箱即用** | 多阶段构建的精简镜像，非 root 运行，内置健康检查、时区与数据卷。 |
 
@@ -100,16 +97,16 @@ docker compose logs -f checkin
 
 ### 4. 在后台完成配置
 
-1. 点击「添加用户」，填写姓名、学号、**统一身份认证密码**（即登录 `idas.uestc.edu.cn` 的密码，不是教务系统或其他密码）和宿舍信息。
-2. 填写[浏览器指纹](#-浏览器指纹获取方法)（强烈建议；获取方法见下文），不填可能在自动登录时触发手机二次验证。
-3. 填写宿舍坐标：推荐用[高德坐标拾取工具](https://www.amap.com/ssr/coordinate-picker)取 GCJ-02 经纬度；也可以保存后进入编辑页，点击「从学校打卡点中选择」。
-4. 回到仪表盘，点击「测试链路」确认登录、微应用、今日状态和打卡点都正常。
-5. 确认「下一个自动签到」落在今天 21:30–23:00 之间。
+1. 在「账号与会话」添加学校账号，填写账号名称、学号、统一身份认证密码和浏览器指纹。可添加多个账号，各自拥有独立会话；新账号默认不启用个人自动签到。
+2. 在班级工作台选择操作账号、日期和学校授权的班级，加载学生记录。只查看自己获授权的班级。
+3. 选择明确的学生，填写情况类型、原因和说明，先查看预览；核对操作账号、日期和每位学生后再提交。
+4. 如需本人签到，在「我的签到」配置真实 GCJ-02 宿舍坐标和窗口，先执行只读链路测试，再明确开启个人自动签到。
+5. 如需定时情况上报，在「上报规则」为具体学号设置日期范围、星期和执行时间；规则与个人签到计划相互独立。
 
 之后保持容器运行即可。默认只监听 `127.0.0.1:8000`；需要局域网访问时，把 `.env` 里的 `APP_BIND` 改为 `0.0.0.0`，并自行加 HTTPS 反向代理与访问控制。
 
 > [!TIP]
-> 首次部署不要直接等到晚上。先用只读的「测试链路」或 `--dry-run` 验证一遍，能把绝大多数配置问题提前暴露。
+> 首次部署先加载可管理班级或执行只读链路测试。预览不会提交情况上报；个人签到 CLI 也须显式传入 `--submit` 才提交。
 
 ## 🔑 浏览器指纹获取方法
 
@@ -121,7 +118,7 @@ docker compose logs -f checkin
 2. 按 `F12`（或 `Ctrl+Shift+I`）打开开发者工具，切换到 **Application / 应用** 面板。如果顶部没有这一项，点 `»` 展开更多面板。
 3. 左侧依次展开 **Storage → Cookies → `https://idas.uestc.edu.cn`**。
 4. 在顶部 Filter 输入 `MULTIFACTOR`，找到名为 `MULTIFACTOR_BROWSER_FINGERPRINT` 的 Cookie。
-5. 复制它的 **Value**（32 位十六进制，不要带引号或空格），粘贴到添加 / 编辑用户页的「浏览器指纹」。
+5. 复制它的 **Value**（32 位十六进制，不要带引号或空格），粘贴到添加 / 编辑账号页的「浏览器指纹」。
 6. 保存后程序会自动转成大写。
 
 > [!TIP]
@@ -139,24 +136,31 @@ docker compose logs -f checkin
   3. 把**纬度**填到表单的「纬度 latitude」，把**经度**填到「经度 longitude」，不要填反；
   4. 坐标保留 6 位小数即可，例如 `30.749700, 103.934500`。
 - 学校打卡点通常有几百米半径，坐标越接近宿舍越好；如果学校接口可用，编辑页的「从学校打卡点中选择」会自动填充坐标、楼栋和地址，优先用它。
-- 也可以手动填写经纬度。`0,0` 会被拒绝；如果提交时提示「不在打卡范围」，先核对坐标顺序和打卡点半径。
+- 也可以手动填写经纬度。仅做班级管理的账号无需坐标；开启个人自动签到或实际提交本人签到前必须配置有效非零坐标。如果提示「不在打卡范围」，先核对坐标顺序和打卡点半径。
 
 ## ⏰ 每日调度
 
 - 默认窗口：`21:30–23:00`，由 `CHECKIN_WINDOW_START` / `CHECKIN_WINDOW_END` 控制。
 - 平台实际允许提交的时间约为 `21:00–23:30`，本项目的默认窗口落在这个范围内。
-- 每位用户在自己的窗口内随机一个时间；多用户之间默认至少间隔 `MIN_USER_GAP_SEC` 秒，避免同时请求。
-- 计划在当天第一次调度 tick 时生成并写入 `plans` 表，所以**重启容器不会重新随机**。想重新随机，点仪表盘的「重新随机」或执行 `python -m app.cli plan regenerate`。
+- 仅对明确启用个人自动签到的账号生成随机时间，多账号默认至少间隔 `MIN_USER_GAP_SEC` 秒。
+- 个人计划在当天首次调度时写入 `plans` 表，**重启不会重新随机**。需要重新随机时，在「我的签到」操作或执行 `python -m app.cli plan regenerate`。
 - 提交成功后会回读 `today`，只有 `recordStatusCode == CHECKED_IN` 才算最终成功；如果平台标记 `abnormalFlag`，会以警告形式显示，提醒人工核对。
 - 已打卡的用户会被直接跳过，不会重复提交。
+
+### 定时情况上报
+
+上报规则绑定一个明确的操作账号和学生学号，并包含情况类型、原因、说明、生效起止日期、ISO 星期（1=周一，7=周日）和执行时间。规则不会借用另一账号的权限；个人自动签到关闭不影响该账号的上报规则。重叠规则需先消除冲突，避免多个管理账号重复上报同一学生。
+
+规则任务与个人签到 `plans` 分开存储，每条规则每天至多领取一个任务。不补交历史日期；执行前重新读取当天学生记录及有效选项。失败、学校确认接收和写结果不明分别记录，写结果不明不自动重发，也不能当成已签到。Web 可编辑规则并重新校验权限及重叠；编辑不会重置当天已领取任务。删除规则会删除其任务列表，实际提交的审计日志仍保留。不要通过删除重建绕过未确认状态，先人工核对学校记录。
 
 ## 💻 管理后台
 
 | 页面 | 作用 |
 | --- | --- |
-| `/` | 今日计划、下一次打卡、用户状态、手动打卡、测试链路、重新随机 |
-| `/users/new` | 添加用户 |
-| `/users/{id}/edit` | 编辑账号、宿舍、坐标、窗口、通知；可从学校打卡点选择位置 |
+| `/` | 班级工作台：选择账号、日期和班级，查询学生，明确选择目标并预览、提交情况上报 |
+| `/self` | 本人学生签到、个人随机计划和只读链路测试，与班干部上报分开 |
+| `/accounts` | 多学校账号、加密凭据和会话管理；个人自动签到默认关闭 |
+| `/rules` | 明确学号的上报规则、启停、日期/星期/时间及独立任务记录 |
 | `/logs` | 运行日志，可按用户筛选、清空 |
 | `/settings` | 版本、时区、窗口、调度器状态、数据库大小、环境变量说明 |
 | `/healthz` | 公开健康检查（不含敏感信息） |
@@ -179,13 +183,27 @@ docker compose up -d --build
 # 进入容器执行 CLI
 docker compose exec checkin python -m app.cli doctor
 docker compose exec checkin python -m app.cli doctor --network
-docker compose exec checkin python -m app.cli user list
+docker compose exec checkin python -m app.cli account list
+# 省略 --password 则安全交互输入；默认不启用本人自动签到
+docker compose exec checkin python -m app.cli account add --name "班干部账号 A" --student-id 2020xxxxxx
+docker compose exec checkin python -m app.cli class list --account 2020xxxxxx
 docker compose exec checkin python -m app.cli plan show
 docker compose exec checkin python -m app.cli plan regenerate
 
-# 手动执行一次（会真正提交；--dry-run 只读）
-docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx --dry-run
-docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx
+# 本人签到：默认只读，显式 --submit 才真正提交
+docker compose exec checkin python -m app.cli self run --account 2020xxxxxx
+docker compose exec checkin python -m app.cli self run --account 2020xxxxxx --submit
+
+# 班干部情况上报：默认预览，确认后增加 --submit
+docker compose exec checkin python -m app.cli report --account 2020xxxxxx --student-id 2023190505033 --location 校内 --reason 学习 --remark "正在努力复习母猪的产后护理。"
+
+# 查找上报选项与学生，--account 始终表示操作账号，不是目标学生
+docker compose exec checkin python -m app.cli report --account 2020xxxxxx --options --location 校内
+docker compose exec checkin python -m app.cli student list --account 2020xxxxxx --keyword 2023190505033
+
+# 明确日期范围和 ISO 星期；定时规则会自动修改学校记录，创建前请核对
+docker compose exec checkin python -m app.cli rule add --account 2020xxxxxx --student-id 2023190505033 --location 校内 --reason 学习 --remark "正在复习" --start-date 2026-10-21 --end-date 2026-10-31 --weekdays 1,2,3,4,5 --run-time 22:00
+docker compose exec checkin python -m app.cli rule jobs --account 2020xxxxxx
 ```
 
 `doctor` 会检查数据目录、数据库、加密、窗口和默认密码；加上 `--network` 还会访问学校登录页，确认网络和页面结构正常。
@@ -197,20 +215,20 @@ docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `ADMIN_PASSWORD` | `changeme` | 管理后台密码。**必须修改**，否则仪表盘会持续告警。 |
-| `APP_SECRET` | 空 | 加密用户密码、签名管理会话的密钥。留空时首次启动生成到数据卷的 `secret.key`。多实例部署必须固定。 |
+| `APP_SECRET` | 空 | 加密账号密码、签名管理会话的密钥。留空时首次启动生成到数据卷的 `secret.key`。保持稳定；每个数据存储只运行一个应用实例。 |
 | `TZ` | `Asia/Shanghai` | 容器时区，影响随机窗口和页面显示。 |
 | `DATA_DIR` | `/data`（容器内） | SQLite、`secret.key` 的持久化目录。 |
 | `DB_PATH` | `$DATA_DIR/checkin.db` | 可选，覆盖数据库路径。 |
 | `CHECKIN_WINDOW_START` | `21:30` | 随机窗口开始，`HH:MM`。 |
 | `CHECKIN_WINDOW_END` | `23:00` | 随机窗口结束，必须晚于开始。 |
-| `RETRY_INTERVAL_SEC` | `180` | 失败重试基准间隔，实际按 1x / 1.5x / 2x 退避并加抖动。 |
-| `MAX_ATTEMPTS` | `20` | 单日最大尝试次数。 |
-| `MIN_USER_GAP_SEC` | `30` | 多用户计划之间的最小间隔。 |
+| `RETRY_INTERVAL_SEC` | `180` | 个人签到失败重试基准间隔，实际按 1x / 1.5x / 2x 退避并加抖动。 |
+| `MAX_ATTEMPTS` | `20` | 个人签到单日最大尝试次数，不适用于情况上报写请求。 |
+| `MIN_USER_GAP_SEC` | `30` | 多账号个人签到计划之间的最小间隔。 |
 | `LOGIN_COOLDOWN_SEC` | `600` | 同一用户两次登录的最小间隔。 |
 | `MAX_LOGINS_PER_DAY` | `3` | 同一用户每天最多登录次数，降低风控风险。 |
 | `HTTP_TIMEOUT` | `20` | 单次学校接口超时（秒）。 |
 | `USER_AGENT` | 固定 Chrome UA | 不建议修改；必须与指纹对应的浏览器一致。 |
-| `SCHEDULER_ENABLED` | `true` | 关闭后只保留 Web / CLI 手动操作，不自动打卡。 |
+| `SCHEDULER_ENABLED` | `true` | 关闭后保留 Web / CLI 手动操作，同时停止个人自动签到和定时情况上报。 |
 | `REVERSE_GEOCODE` | `false` | 提交前是否调用学校逆地理编码接口。关闭时使用用户地址或默认「四川省成都市」。 |
 | `COOKIE_SECURE` | `false` | 仅在 HTTPS 反向代理后设为 `true`。 |
 | `NOTIFY_WEBHOOK` | 空 | 全局通知地址；用户级 `notify_url` 可覆盖。 |
@@ -223,7 +241,7 @@ docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx
 默认使用 Docker 命名卷 `uestc-checkin-data`，挂载到容器的 `/data`：
 
 ```text
-/data/checkin.db    SQLite：用户、计划、日志、加密会话
+/data/checkin.db    SQLite：学校账号、个人计划、上报预览、规则与任务、日志、加密会话
 /data/secret.key    未设置 APP_SECRET 时自动生成的密钥
 ```
 
@@ -244,6 +262,10 @@ docker run --rm -v uestc-checkin-data:/data -v "$PWD":/backup alpine \
 ```
 
 恢复时把文件放回卷内即可。**务必同时备份 `APP_SECRET`（或 `secret.key`）和 `checkin.db`**：换了密钥，已保存的用户密码将无法解密，只能重新录入。
+
+升级会在原数据库增加上报预览、规则和任务存储，不删除原学校账号、密码、会话或个人计划。原账号的个人自动签到启停状态保持不变；只有新增账号默认关闭。内部 `users` 表仍用于学校账号，`enabled` 表示个人自动签到开关，不表示学校班干部权限或账号可否登录。迁移前备份数据库和对应密钥；一个数据存储只运行一个应用 worker。
+
+情况上报预览绑定操作账号并有有效期，提交为一次性操作；提交前重新解析当天记录。中断或网络超时后可能无法确定学校是否已接收，界面会保留未确认状态，不自动切换账号或盲目重发。请先到学校核对，再决定是否重新准备新预览。
 
 迁移到另一台机器：复制整个项目 + `.env` + 数据卷备份，在新机器执行 `docker compose up -d --build`，再恢复 `/data`。
 
@@ -280,7 +302,7 @@ docker run --rm -v uestc-checkin-data:/data -v "$PWD":/backup alpine \
 app/
   main.py            FastAPI 路由、管理后台、CSRF、模板上下文
   asgi.py            uvicorn 入口（app.asgi:app）
-  cli.py             serve / user / plan / run / doctor
+  cli.py             account / class / student / report / self / rule / plan / doctor / serve
   config.py          环境变量与 Settings
   db.py              SQLite schema 与数据访问
   planning.py        随机窗口、重试退避
@@ -293,6 +315,8 @@ app/
     http.py          requests 封装（手动 302、Cookie 控制）
     checkin.py       门户预热、微应用、today / checkin API
     service.py       单用户完整打卡编排
+    admin.py         班干部协议接口与精确匹配
+    admin_service.py 多账号会话、预览、提交、规则与上报任务编排
     errors.py        异常分类
   templates/         Jinja2 页面
   static/            CSS
@@ -322,10 +346,10 @@ python -m venv .venv
 
 ```bash
 docker compose exec checkin python -m app.cli doctor --network
-docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx --dry-run
+docker compose exec checkin python -m app.cli self run --account 2020xxxxxx
 ```
 
-`--dry-run` 不会提交打卡，只验证登录、预热、微应用、今日状态和打卡点。
+不带 `--submit` 的 `self run` 不提交本人签到，只验证登录、预热、微应用、今日状态和打卡点。`report` 默认只生成预览；与只读验证一样，可能消耗一次 CAS 登录并更新缓存会话。
 
 ## 🗺️ Roadmap
 
@@ -356,7 +380,7 @@ docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx --dry-
 <details>
 <summary><b>支持多用户 / 多账号吗？</b></summary>
 
-支持。每位用户有独立的学号、密码、宿舍坐标、时间窗口、通知地址与启停状态；默认多用户之间至少错开 30 秒。
+支持多个学校账号，各自独立凭据、指纹、会话、学校授权班级和上报规则。每个账号还可选择配置本人的学生签到，默认关闭；个人签到关闭不妨碍班级管理。控制台仍共用一个管理密码，不提供多操作员隔离。
 </details>
 
 <details>
@@ -380,7 +404,7 @@ docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx --dry-
 <details>
 <summary><b>可以固定某个时间打卡吗？</b></summary>
 
-不能精确到秒，也不建议卡点。程序会在你配置的窗口内随机选一个时间，以降低同时请求与风控风险。平台允许的提交时段约为 21:00–23:30。
+个人签到继续在配置窗口内随机执行，不提供固定秒级签到。情况上报规则则使用明确的 `HH:MM` 执行时间，受后台调度轮询和网络耗时影响，不保证秒级准点。两类任务分开管理。
 </details>
 
 <details>
@@ -388,6 +412,57 @@ docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx --dry-
 
 以回读 `today` 的结果为准。平台每天只允许一次打卡，回读未确认时不要反复点「立即打卡」，先到平台核对，再查看 `/logs` 中的错误详情。
 </details>
+
+## 班干部协议 API
+
+`app/uestc/admin.py` 根据 HAR 封装学校的低层班干部接口。直接调用本模块须提供已登录、已预热且获学校授权的 `UestcHttp`；本模块不执行登录或重试。Web、CLI 和定时上报统一使用 `app/uestc/admin_service.py:AdminService` 管理账号会话、预览、一次性提交和操作记录。
+
+| Python 函数 | 学校接口（相对于 `/daily-checkin/api`） | 返回值 |
+| --- | --- | --- |
+| `fetch_checkin_count(client, business_date)` | `GET /class-cadre/checkin-count` | 整数计数 |
+| `fetch_my_classes(client)` | `GET /class-cadre/my-classes` | 原始班级列表，包含 `classKey` |
+| `fetch_checkin_list(client, business_date, class_key, *, keyword="", page_index=1, page_size=10)` | `GET /class-cadre/checkin-list` | 完整响应，包含同级 `data` 和 `page` |
+| `fetch_situation_types(client)` | `POST /common/attachMore` | `situationTypeOptions` 列表 |
+| `fetch_case_keywords(client, location_type_code)` | `GET /case-keyword/active` | 原始关键词列表，包含 `remarkRequired` |
+| `report_situations(client, reports)` | `POST /class-cadre/situation/report` | 学校返回的布尔确认值 |
+
+`business_date` 使用 `YYYY-MM-DD`；分页从 1 开始，不自动遍历后续页。`page` 保留学校的 `pageIndex`、`pageSize`、`totalCount`、`orderBy`、`totalPage`，其中 `totalCount` 在 HAR 中为字符串。记录 ID、班级键及其他原始字段不转换。
+
+`location_type_code` 为 `CAMPUS` 或 `OUTSIDE`。`reports` 是 JSON 数组，每项包含 `classKey`、`recordId`、`locationTypeCode`、`caseKeywordId`、`caseRemark`；班级键和关键词 ID 应从对应查询接口获取。**上报会修改学校记录**，布尔确认不代表学生已完成签到。接口失败沿用现有的 `SessionInvalid`、`ApiError`、`HttpStatusError`、`NetworkError` 异常，不把失败当成空列表或成功。
+
+### 按学号或姓名上报
+
+以下高层 API 自动查询可管理班级和全部分页，精确匹配学生，并将中文情况类型、原因解析为学校所需的 ID：
+
+- `resolve_student(client, business_date, *, student_id=None, student_name=None, class_key=None)`：返回 `{"classKey": ..., "record": ...}`。
+- `build_situation_report(client, business_date, location, reason, remark, *, student_id=None, student_name=None, class_key=None)`：只查询并构造单条上报字典，**不提交**；可交给 `report_situations` 批量提交。
+- `report_student_situation(...)`：参数同上，解析成功后提交一次，返回学校的布尔确认值，**会修改学校记录**。
+
+```python
+from app.uestc.admin import build_situation_report, report_student_situation
+
+# client 为调用方已登录并预热的 UestcHttp 会话。
+payload = build_situation_report(
+    client,
+    "2026-10-21",
+    "校内",
+    "学习",
+    "正在努力复习母猪的产后护理。",
+    student_id="2023190505033",
+)
+
+# 仅在确需修改学校记录时调用；这不是预览。
+acknowledged = report_student_situation(
+    client,
+    "2026-10-21",
+    "校内",
+    "学习",
+    "正在努力复习母猪的产后护理。",
+    student_id="2023190505033",
+)
+```
+
+学号和姓名至少提供一个；同时提供时必须都匹配。姓名不做模糊匹配，同名时须增加学号或 `class_key` 限定。未找到学生、情况类型或原因，匹配不唯一，或原因要求说明但说明为空白时，抛出 `ApiError` 且不提交。原因只在选定的情况类型内查找。每天的 `recordId` 按指定日期重新查询，不缓存、不跨日复用；低层选项从学校读取，不硬编码。控制台和 CLI 使用上层 `AdminService.prepare(...)` / `submit(...)`，而不是直接调用低层提交函数。
 
 ## 🤝 贡献
 
@@ -406,7 +481,7 @@ docker compose exec checkin python -m app.cli run --student-id 2020xxxxxx --dry-
 > 请在使用前完整阅读本节。
 
 - 本项目通过模拟浏览器请求完成打卡，**不是学校官方客户端**。学校可能随时调整接口、加密方式、风控策略或使用条款。
-- 请只用于自己的账号，**不要批量代打、出售服务或绕过学校的合理限制**。
+- 本人签到只使用自己的账号；班级情况上报仅限学校明确授权的管理范围，内容须符合真实情况。**不要批量代打、出售服务或绕过学校的合理限制**。
 - 自动打卡的前提是：人在宿舍附近、账号状态正常、微应用已绑定。坐标造假或人不在宿舍可能被平台判定异常（`abnormalFlag`），后果由使用者承担。
 - 容器必须持续运行；机器休眠、断网、Docker 停止都会导致当天无法自动执行。
 - 平台每天只允许一次打卡。提交成功但回读未确认时，不要反复手动点击「立即打卡」，先到平台核对。
