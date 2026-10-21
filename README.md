@@ -95,6 +95,25 @@ docker compose logs -f checkin
 
 打开 <http://127.0.0.1:8000>，用 `ADMIN_PASSWORD` 登录。
 
+#### GitHub Actions 多架构镜像
+
+`.github/workflows/docker.yml` 使用 Docker Buildx 和 QEMU 构建同一个支持 `linux/amd64`、`linux/arm64` 的多平台镜像：
+
+- 面向 `main` 的 Pull Request：仅构建验证，不登录镜像仓库、不发布。
+- 推送到 `main`：发布到 `ghcr.io/<owner>/<repository>`（名称自动转小写），标签包含 `latest`、`main` 和 `sha-<短提交号>`。
+- 推送 `v*` 标签：发布原始标签和提交标签；语义版本如 `v1.2.3` 还生成 `1.2.3`、`1.2`，不会覆盖 `latest`。
+- 可在 Actions 页面手动触发；会发布所选分支/标签对应的镜像，只有选择 `main` 才更新 `latest`。
+
+发布使用仓库自带的 `GITHUB_TOKEN` 和任务级 `packages: write`，不需要配置 Docker Hub 密钥。组织策略须允许发布 GHCR 包；首次发布后，如需匿名拉取，请在 GitHub Package 设置中确认包为公开。已有包须允许当前仓库的 Actions 写入。
+
+工作流首次成功发布后可拉取，Docker 会自动选择宿主机架构：
+
+```bash
+docker pull ghcr.io/andingdrlin/uestc-autocheckin:latest
+```
+
+Fork 请替换为自己的小写 owner/repository。现有 Compose 仍默认本地构建；使用发布镜像时，将服务的 `image` 改为上述 GHCR 地址，然后执行 `docker compose pull` 和 `docker compose up -d --no-build`，保留原有环境变量、端口和数据卷。
+
 ### 4. 在后台完成配置
 
 1. 在「账号与会话」添加学校账号，填写账号名称、学号、统一身份认证密码和浏览器指纹。可添加多个账号，各自拥有独立会话；新账号默认不启用个人自动签到。
