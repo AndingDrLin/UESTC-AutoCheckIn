@@ -1,5 +1,4 @@
 <div align="center">
-  <img src="docs/banner.svg" alt="UESTC AutoCheckIn — 晚安成电自动打卡" width="100%">
 
 # 🌙 UESTC AutoCheckIn
 
@@ -7,18 +6,13 @@
 
 在 Docker 中稳定运行的自动签到服务：模拟真实浏览器完成统一身份认证、门户预热与 H5 打卡，每天在 **21:30–23:00** 之间随机选择一个时间自动提交。
 
-[![GitHub Stars](https://img.shields.io/github/stars/AndingDrLin/UESTC-AutoCheckIn?style=flat-square&logo=github&label=Stars&color=4f46e5)](https://github.com/AndingDrLin/UESTC-AutoCheckIn/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/AndingDrLin/UESTC-AutoCheckIn?style=flat-square&logo=github&label=Forks&color=6366f1)](https://github.com/AndingDrLin/UESTC-AutoCheckIn/network/members)
-[![GitHub Issues](https://img.shields.io/github/issues/AndingDrLin/UESTC-AutoCheckIn?style=flat-square&logo=github&label=Issues&color=818cf8)](https://github.com/AndingDrLin/UESTC-AutoCheckIn/issues)
-[![Last Commit](https://img.shields.io/github/last-commit/AndingDrLin/UESTC-AutoCheckIn?style=flat-square&logo=git&label=Last%20Commit&color=a5b4fc)](https://github.com/AndingDrLin/UESTC-AutoCheckIn/commits/main)
-
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-fbbf24?style=flat-square)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-22c55e?style=flat-square)](https://github.com/AndingDrLin/UESTC-AutoCheckIn/pulls)
 
-[快速开始](#-快速开始) · [功能特性](#-功能特性) · [工作原理](#-工作原理) · [管理后台](#-管理后台) · [配置项](#-配置项) · [FAQ](#-faq) · [使用边界与风险](#-使用边界与风险)
+[快速开始](#-快速开始) · [功能特性](#-功能特性) · [管理后台](#-管理后台) · [配置项](#-配置项) · [FAQ](#-faq) · [使用边界与风险](#-使用边界与风险)
 
 </div>
 
@@ -34,7 +28,7 @@
 **UESTC AutoCheckIn** 把这套流程完整地搬进了容器：
 
 - 每天在窗口内**随机**选一个时间，而不是卡点提交；
-- 到点自动完成 CAS 登录、门户预热、微应用跳转、状态读取与提交；
+- 到点自动完成统一身份认证（CAS）登录、门户预热、微应用跳转、状态读取与提交；
 - 提交后**回读今日记录**，只有平台确认 `CHECKED_IN` 才算成功；
 - 失败按退避策略重试，并通过 ServerChan / Webhook 告诉你；
 - 提供一个本地 Web 后台，用户、坐标、计划、日志、手动打卡都能可视化操作。
@@ -55,52 +49,6 @@
 | ⌨️ | **CLI** | `doctor` / `user` / `plan` / `run` / `serve`，方便无头服务器与自动化运维。 |
 | 🔔 | **通知** | 支持 ServerChan 或任意 JSON Webhook，成功 / 失败 / 需要人工处理时推送。 |
 | 🐳 | **开箱即用** | 多阶段构建的精简镜像，非 root 运行，内置健康检查、时区与数据卷。 |
-
-## 📸 界面预览
-
-<p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="管理后台仪表盘" width="100%">
-</p>
-
-<details>
-<summary><b>查看更多界面截图</b>（用户编辑 / 运行日志）</summary>
-
-<br>
-
-**用户编辑**：账号、指纹、宿舍坐标、时间窗口与通知配置都在一个页面完成，支持从学校打卡点列表选点。
-
-<p align="center">
-  <img src="docs/screenshots/user-edit.png" alt="用户编辑页面" width="100%">
-</p>
-
-**运行日志**：按用户筛选每一次登录、预热、提交与重试，排查问题不再靠猜。
-
-<p align="center">
-  <img src="docs/screenshots/logs.png" alt="运行日志页面" width="100%">
-</p>
-
-</details>
-
-## 🧭 工作原理
-
-```mermaid
-flowchart TD
-    A["每天 21:30–23:00<br/>为用户随机生成计划"] --> B["后台调度线程到点取任务"]
-    B --> C{"加密 SESSION 可用？"}
-    C -- 是 --> E["门户预热<br/>GET /api/isLoginFailure"]
-    C -- 否 --> D["CAS 统一身份认证<br/>密码 AES-128-CBC 加密"]
-    D --> E
-    E --> F["进入微应用<br/>checkLogin 跳转 H5"]
-    F --> G["GET today<br/>读取今日状态"]
-    G -- 已打卡 --> H["直接成功，不重复提交"]
-    G -- 未打卡 --> I["POST checkin<br/>提交 H5 同款 JSON"]
-    I --> J["回读 today"]
-    J -- CHECKED_IN --> K["成功"]
-    J -- 未确认 --> L["窗口内退避重试"]
-    L --> I
-```
-
-关键点：登录后必须先请求一次 `https://jzsz.uestc.edu.cn/api/isLoginFailure` 做「门户预热」，否则微应用接口会返回 `code=4001 登录无效或已过期`。这是整条链路里最容易漏掉、也最容易被误判为「密码错误」的一步。
 
 ## 🚀 快速开始
 
@@ -152,9 +100,9 @@ docker compose logs -f checkin
 
 ### 4. 在后台完成配置
 
-1. 点击「添加用户」，填写姓名、学号、统一身份认证密码、宿舍信息。
-2. 填写[浏览器指纹](#-获取浏览器指纹)（强烈建议），或暂时留空。
-3. 填写宿舍坐标；最省事的方式是保存后进入编辑页，点击「从学校打卡点中选择」。
+1. 点击「添加用户」，填写姓名、学号、**统一身份认证密码**（即登录 `idas.uestc.edu.cn` 的密码，不是教务系统或其他密码）和宿舍信息。
+2. 填写[浏览器指纹](#-浏览器指纹获取方法)（强烈建议；获取方法见下文），不填可能在自动登录时触发手机二次验证。
+3. 填写宿舍坐标：推荐用[高德坐标拾取工具](https://www.amap.com/ssr/coordinate-picker)取 GCJ-02 经纬度；也可以保存后进入编辑页，点击「从学校打卡点中选择」。
 4. 回到仪表盘，点击「测试链路」确认登录、微应用、今日状态和打卡点都正常。
 5. 确认「下一个自动签到」落在今天 21:30–23:00 之间。
 
@@ -163,24 +111,35 @@ docker compose logs -f checkin
 > [!TIP]
 > 首次部署不要直接等到晚上。先用只读的「测试链路」或 `--dry-run` 验证一遍，能把绝大多数配置问题提前暴露。
 
-## 🔑 获取浏览器指纹
+## 🔑 浏览器指纹获取方法
 
-学校用 `MULTIFACTOR_BROWSER_FINGERPRINT` 把「账号 + 浏览器」记为可信设备。填入后，自动登录通常不再触发手机二次验证。
+学校用 `MULTIFACTOR_BROWSER_FINGERPRINT` 把「账号 + 浏览器」记为可信设备。填写后，自动登录通常不再触发手机二次验证；不填则可能每次登录都要验证，导致自动打卡失败。
 
-1. 在电脑浏览器打开 <https://idas.uestc.edu.cn/authserver/login>，正常登录一次（这一次可以用手机验证）。
-2. 打开开发者工具 → **Application（应用）** → **Storage** → **Cookies** → `https://idas.uestc.edu.cn`。
-3. 找到 `MULTIFACTOR_BROWSER_FINGERPRINT`，复制它的 32 位十六进制值。
-4. 粘贴到用户表单的「浏览器指纹」，程序会自动转成大写。
+### 获取步骤
+
+1. 用**平时登录学校系统的那台电脑和浏览器**打开 <https://idas.uestc.edu.cn/authserver/login>，正常登录一次（这一次可以用手机验证）。
+2. 按 `F12`（或 `Ctrl+Shift+I`）打开开发者工具，切换到 **Application / 应用** 面板。如果顶部没有这一项，点 `»` 展开更多面板。
+3. 左侧依次展开 **Storage → Cookies → `https://idas.uestc.edu.cn`**。
+4. 在顶部 Filter 输入 `MULTIFACTOR`，找到名为 `MULTIFACTOR_BROWSER_FINGERPRINT` 的 Cookie。
+5. 复制它的 **Value**（32 位十六进制，不要带引号或空格），粘贴到添加 / 编辑用户页的「浏览器指纹」。
+6. 保存后程序会自动转成大写。
+
+> [!TIP]
+> 列表里找不到这个 Cookie 时，先退出学校登录，再重新登录并完成一次手机验证；仍然没有就换 Chrome / Edge 重试。不要用无痕模式，关闭窗口后 Cookie 会丢失。
 
 > [!NOTE]
-> 指纹必须和固定的 User-Agent 配套使用。本项目默认使用一个真实的桌面 Chrome UA；如果你修改了 `USER_AGENT`，请确保它与产生指纹的浏览器一致，否则仍可能被要求二次验证。
+> 指纹必须和固定的 User-Agent 配套使用。本项目默认使用一个真实的桌面 Chrome UA；如果你修改了 `USER_AGENT`，请确保它与产生指纹的浏览器一致，否则仍可能被要求二次验证。指纹本身不是密码，但可以标识设备，请不要发到公开 Issue 或截图里。
 
 ## 📍 宿舍坐标
 
-- 坐标使用 **GCJ-02**（高德 / 腾讯地图坐标系），不是 WGS-84。
-- 学校打卡点通常有几百米半径，坐标越接近宿舍越好。
-- 编辑页的「从学校打卡点中选择」会调用学校接口拉取可用打卡点，选中后自动填充坐标、楼栋和地址。
-- 也可以手动填写经纬度。`0,0` 会被拒绝；如果提交时提示「不在打卡范围」，先核对坐标和打卡点半径。
+- 坐标使用 **GCJ-02**（高德 / 腾讯地图坐标系），不是 WGS-84，也不是手机 GPS 的原始坐标。
+- 推荐用高德官方的[坐标拾取工具](https://www.amap.com/ssr/coordinate-picker)：
+  1. 打开链接，搜索「电子科技大学清水河校区 + 宿舍楼名」，或直接拖动地图到宿舍位置；
+  2. 在宿舍所在位置单击，工具会显示该点的经度和纬度（通常写作「经度, 纬度」）；
+  3. 把**纬度**填到表单的「纬度 latitude」，把**经度**填到「经度 longitude」，不要填反；
+  4. 坐标保留 6 位小数即可，例如 `30.749700, 103.934500`。
+- 学校打卡点通常有几百米半径，坐标越接近宿舍越好；如果学校接口可用，编辑页的「从学校打卡点中选择」会自动填充坐标、楼栋和地址，优先用它。
+- 也可以手动填写经纬度。`0,0` 会被拒绝；如果提交时提示「不在打卡范围」，先核对坐标顺序和打卡点半径。
 
 ## ⏰ 每日调度
 
@@ -330,7 +289,7 @@ app/
   notifier.py        ServerChan / JSON Webhook
   uestc/
     cas.py           统一身份认证登录
-    crypto.py        CAS 密码 AES-128-CBC 加密
+    crypto.py        统一身份认证密码 AES-128-CBC 加密
     http.py          requests 封装（手动 302、Cookie 控制）
     checkin.py       门户预热、微应用、today / checkin API
     service.py       单用户完整打卡编排
@@ -338,7 +297,6 @@ app/
   templates/         Jinja2 页面
   static/            CSS
 tests/               pytest（不访问学校网络）
-docs/                README 素材与界面截图
 Dockerfile
 docker-compose.yml
 .env.example
@@ -358,7 +316,7 @@ python -m venv .venv
 .venv/bin/python -m pytest
 ```
 
-测试覆盖数据库、随机计划、AES 加密、管理会话、H5 载荷 / 错误分类、CAS 响应分类，以及 FastAPI 管理后台的主要页面和 CSRF。测试不会访问学校网络。
+测试覆盖数据库、随机计划、AES 加密、管理会话、H5 载荷 / 错误分类、统一身份认证响应分类，以及 FastAPI 管理后台的主要页面和 CSRF。测试不会访问学校网络。
 
 如果要连真实环境做只读验证：
 
