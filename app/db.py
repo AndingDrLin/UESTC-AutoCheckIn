@@ -177,7 +177,7 @@ class Database:
             "address": "",
             "latitude": 0.0,
             "longitude": 0.0,
-            "window_start": "21:30",
+            "window_start": "21:00",
             "window_end": "23:00",
             "notify_url": "",
             "notes": "",

@@ -36,6 +36,9 @@ def test_seed_buildings_are_unique_and_plausible():
     assert len(names) == len(set(names))
     assert "本科13栋" in names
     assert "本科4栋" in names
+    assert "本科2组团" in names
+    assert "本科4组团" in names
+    assert "本科3组团" not in names
     for name, latitude, longitude, source in SEED_BUILDINGS:
         assert normalize_building(name) == name
         assert 30.7 < latitude < 30.8

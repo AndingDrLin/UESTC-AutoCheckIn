@@ -29,7 +29,7 @@ def test_user_crud_and_unique_student_id(tmp_path):
     assert user["name"] == "张三"
     assert user["student_id"] == "2020001"
     assert user["enabled"] == 1
-    assert user["window_start"] == "21:30"
+    assert user["window_start"] == "21:00"
     assert user["window_end"] == "23:00"
     assert db.get_user_by_student_id("2020001")["id"] == uid
     assert db.count_users() == 1

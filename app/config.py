@@ -23,7 +23,7 @@ DEFAULT_USER_AGENT = (
 )
 
 #: The platform's real submission window (observed via the schedule API).
-#: It is wider than the default 21:30-23:00 window we schedule in.
+#: It is wider than the default 21:00-23:00 window we schedule in.
 PLATFORM_WINDOW_START = time(21, 0)
 PLATFORM_WINDOW_END = time(23, 30)
 
@@ -90,7 +90,7 @@ class Settings:
     app_secret: str = ""
     secret_source: str = "explicit"
     tz_name: str = "Asia/Shanghai"
-    window_start: time = time(21, 30)
+    window_start: time = time(21, 0)
     window_end: time = time(23, 0)
     retry_interval_sec: int = 180
     max_attempts: int = 20
@@ -179,7 +179,7 @@ def load_settings() -> Settings:
         app_secret=secret,
         secret_source=secret_source,
         tz_name=os.getenv("TZ", "Asia/Shanghai"),
-        window_start=parse_hhmm(os.getenv("CHECKIN_WINDOW_START", "21:30")),
+        window_start=parse_hhmm(os.getenv("CHECKIN_WINDOW_START", "21:00")),
         window_end=parse_hhmm(os.getenv("CHECKIN_WINDOW_END", "23:00")),
         retry_interval_sec=_env_int("RETRY_INTERVAL_SEC", 180, 30),
         max_attempts=_env_int("MAX_ATTEMPTS", 20, 1),
