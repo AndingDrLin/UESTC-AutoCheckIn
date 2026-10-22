@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-fbbf24?style=flat-square)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-22c55e?style=flat-square)](https://github.com/AndingDrLin/UESTC-AutoCheckIn/pulls)
 
-[快速开始](#-快速开始) · [功能特性](#-功能特性) · [管理后台](#-管理后台) · [配置项](#-配置项) · [FAQ](#-faq) · [使用边界与风险](#-使用边界与风险)
+[News](#-news) · [快速开始](#-快速开始) · [功能特性](#-功能特性) · [管理后台](#-管理后台) · [配置项](#-配置项) · [FAQ](#-faq) · [使用边界与风险](#-使用边界与风险)
 
 </div>
 
@@ -34,6 +34,14 @@
 - 提供一个本地 Web 后台，用户、坐标、计划、日志、手动打卡都能可视化操作。
 
 它是单个 Python 服务，依赖少、启动快，一条 `docker compose up -d` 即可长期运行。
+
+## 📰 News
+
+- **2026-10-22** · 看板底部新增「宿舍楼坐标」面板，楼栋基准坐标可以直接在看板上增删改，不用再进设置页（[`8a9c7c0`](https://github.com/AndingDrLin/UESTC-AutoCheckIn/commit/8a9c7c0)）
+- **2026-10-22** · 默认打卡窗口调整为 **21:00–23:00**，预置楼栋精简为 `本科13栋` / `本科4栋` / `本科2组团` / `本科4组团`（[`1522412`](https://github.com/AndingDrLin/UESTC-AutoCheckIn/commit/1522412)）
+- **2026-10-22** · 引入楼栋坐标基准：新增用户只需填「本科X栋」，坐标按楼栋自动匹配并叠加 ≤25 米扰动；同步重构看板、添加 / 编辑用户页与设置页（[`84bdd88`](https://github.com/AndingDrLin/UESTC-AutoCheckIn/commit/84bdd88)）
+- **2026-10-21** · 精简 README，补充浏览器指纹与楼栋坐标的获取方法（[`7252157`](https://github.com/AndingDrLin/UESTC-AutoCheckIn/commit/7252157)）
+- **2026-10-21** · 项目初始化：Docker 一键部署、多用户随机调度、Web 管理后台与完整 CLI（[`691aad0`](https://github.com/AndingDrLin/UESTC-AutoCheckIn/commit/691aad0)）
 
 ## ✨ 功能特性
 
