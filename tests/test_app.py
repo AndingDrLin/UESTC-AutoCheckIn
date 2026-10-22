@@ -51,16 +51,7 @@ def add_user(client: TestClient, student_id: str = "2020001") -> int:
             "student_id": student_id,
             "password": "cas-password",
             "fingerprint": "A" * 32,
-            "dorm_building": "学知苑 5 栋",
-            "dorm_room": "512",
-            "address": "四川省成都市郫都区",
-            "latitude": "30.754980",
-            "longitude": "103.933883",
-            "window_start": "21:30",
-            "window_end": "23:00",
-            "notify_url": "",
-            "notes": "",
-            "enabled": "1",
+            "dorm_building": "本科13栋",
         },
         follow_redirects=False,
     )
@@ -81,7 +72,7 @@ def test_admin_requires_login_and_rejects_bad_password(app):
         login(client)
         page = client.get("/")
         assert page.status_code == 200
-        assert "今日打卡" in page.text
+        assert "今晚的打卡" in page.text
         assert "还没有用户" in page.text
 
 
@@ -94,7 +85,7 @@ def test_add_user_dashboard_edit_logs_settings_and_health(app):
         assert page.status_code == 200
         assert "张三" in page.text
         assert "2020001" in page.text
-        assert "学知苑 5 栋" in page.text
+        assert "本科13栋" in page.text
 
         db = app.state.db
         user = db.list_users()[0]
@@ -108,8 +99,9 @@ def test_add_user_dashboard_edit_logs_settings_and_health(app):
 
         edit = client.get(f"/users/{user_id}/edit")
         assert edit.status_code == 200
-        assert "编辑用户" in edit.text
-        assert "从学校打卡点中选择" in edit.text
+        assert "编辑 张三" in edit.text
+        assert "重新匹配坐标" in edit.text
+        assert "本科13栋" in edit.text
 
         logs = client.get("/logs")
         assert logs.status_code == 200
@@ -120,6 +112,8 @@ def test_add_user_dashboard_edit_logs_settings_and_health(app):
         assert settings_page.status_code == 200
         assert "设置与运行状态" in settings_page.text
         assert "自动打卡窗口" in settings_page.text
+        assert "宿舍楼坐标" in settings_page.text
+        assert "本科13栋" in settings_page.text
 
         health = client.get("/healthz")
         assert health.status_code == 200
@@ -176,8 +170,81 @@ def test_test_result_template_renders_full_detail(app, monkeypatch):
         assert response.status_code == 200
         assert "链路测试" in response.text
         assert "CHECKED_IN" in response.text
-        assert "用此位置" in response.text
+        assert "校准" in response.text
         assert "学知苑 5 栋" in response.text
+
+
+def test_building_crud_and_user_matching(app):
+    with TestClient(app) as client:
+        login(client)
+        page = client.get("/settings")
+        csrf = csrf_from(page.text)
+
+        response = client.post(
+            "/buildings",
+            data={
+                "_csrf": csrf,
+                "name": "本科 7 栋",
+                "latitude": "30.754000",
+                "longitude": "103.932000",
+                "source": "手动录入",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        building = app.state.db.get_building("本科7栋")
+        assert building is not None
+        assert round(building["latitude"], 3) == 30.754
+
+        page = client.get("/settings")
+        assert "本科7栋" in page.text
+
+        # 用户坐标以楼栋基准为中心抖动，必须落在基准附近。
+        add = client.get("/users/new")
+        response = client.post(
+            "/users/new",
+            data={
+                "_csrf": csrf_from(add.text),
+                "name": "李四",
+                "student_id": "2020002",
+                "password": "cas-password",
+                "fingerprint": "",
+                "dorm_building": "本科7栋",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        user = app.state.db.get_user_by_student_id("2020002")
+        assert user is not None
+        assert user["dorm_building"] == "本科7栋"
+        assert abs(user["latitude"] - 30.754) < 0.001
+        assert abs(user["longitude"] - 103.932) < 0.001
+
+        # 未登记的楼栋会被拒绝，并把错误回显在表单上。
+        add = client.get("/users/new")
+        response = client.post(
+            "/users/new",
+            data={
+                "_csrf": csrf_from(add.text),
+                "name": "王五",
+                "student_id": "2020003",
+                "password": "cas-password",
+                "fingerprint": "",
+                "dorm_building": "本科99栋",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 400
+        assert "本科99栋" in response.text
+
+        page = client.get("/settings")
+        response = client.post(
+            "/buildings/delete",
+            data={"_csrf": csrf_from(page.text), "name": "本科7栋"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert app.state.db.get_building("本科7栋") is None
 
 
 def test_csrf_is_enforced_for_mutations(app):

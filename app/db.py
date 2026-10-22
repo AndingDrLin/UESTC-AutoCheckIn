@@ -10,9 +10,11 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from .uestc.dorms import SEED_BUILDINGS, sort_key
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -81,6 +83,14 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS buildings (
+    name       TEXT PRIMARY KEY,
+    latitude   REAL NOT NULL,
+    longitude  REAL NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -123,6 +133,19 @@ class Database:
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(SCHEMA)
+            self._seed_buildings(conn)
+
+    @staticmethod
+    def _seed_buildings(conn: sqlite3.Connection) -> None:
+        """只在表为空时写入默认楼栋，管理员删掉的默认项不会被重新塞回来。"""
+        if conn.execute("SELECT COUNT(*) FROM buildings").fetchone()[0]:
+            return
+        now = utc_now_iso()
+        conn.executemany(
+            "INSERT OR IGNORE INTO buildings"
+            " (name, latitude, longitude, source, updated_at) VALUES (?, ?, ?, ?, ?)",
+            [(*row, now) for row in SEED_BUILDINGS],
+        )
 
     # -- users --------------------------------------------------------------
     _USER_FIELDS = {
@@ -226,6 +249,46 @@ class Database:
             sql += " WHERE enabled = 1"
         with self.connect() as conn:
             return int(conn.execute(sql).fetchone()["n"])
+
+    # -- buildings ----------------------------------------------------------
+    _BUILDING_COLUMNS = "name, latitude, longitude, source, updated_at"
+
+    def list_buildings(self) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self._BUILDING_COLUMNS} FROM buildings ORDER BY name"
+            ).fetchall()
+        return sorted((dict(r) for r in rows), key=lambda r: sort_key(r["name"]))
+
+    def get_building(self, name: str) -> dict | None:
+        with self.connect() as conn:
+            return _row(
+                conn.execute(
+                    f"SELECT {self._BUILDING_COLUMNS} FROM buildings WHERE name = ?",
+                    (name,),
+                ).fetchone()
+            )
+
+    def upsert_building(
+        self,
+        name: str,
+        latitude: float,
+        longitude: float,
+        source: str = "",
+    ) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute(
+                "INSERT INTO buildings (name, latitude, longitude, source, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(name) DO UPDATE SET"
+                " latitude = excluded.latitude, longitude = excluded.longitude,"
+                " source = excluded.source, updated_at = excluded.updated_at",
+                (name, float(latitude), float(longitude), source[:100], utc_now_iso()),
+            )
+
+    def delete_building(self, name: str) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute("DELETE FROM buildings WHERE name = ?", (name,))
 
     # -- plans --------------------------------------------------------------
     def insert_plan(
@@ -374,6 +437,39 @@ class Database:
         with self._write_lock, self.connect() as conn:
             conn.execute("DELETE FROM plans WHERE created_at < ?", (cutoff_iso,))
             conn.execute("DELETE FROM logs WHERE ts < ?", (cutoff_iso,))
+
+    def recent_stats(self, days: int = 7, today: date | None = None) -> list[dict]:
+        """过去 days 天（含今天）的计划执行情况，用于看板上的迷你趋势图。"""
+        end = today or datetime.now().date()
+        start = end - timedelta(days=days - 1)
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT plan_date, status, COUNT(*) AS n FROM plans"
+                " WHERE plan_date >= ? AND plan_date <= ?"
+                " GROUP BY plan_date, status",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+        buckets: dict[str, dict[str, int]] = {}
+        for row in rows:
+            bucket = buckets.setdefault(row["plan_date"], {"total": 0, "success": 0})
+            bucket["total"] += int(row["n"])
+            if row["status"] == "success":
+                bucket["success"] += int(row["n"])
+        out: list[dict] = []
+        for offset in range(days):
+            day = start + timedelta(days=offset)
+            bucket = buckets.get(day.isoformat(), {"total": 0, "success": 0})
+            total = bucket["total"]
+            out.append(
+                {
+                    "date": day.isoformat(),
+                    "weekday": "一二三四五六日"[day.weekday()],
+                    "total": total,
+                    "success": bucket["success"],
+                    "rate": round(bucket["success"] * 100 / total) if total else None,
+                }
+            )
+        return out
 
     # -- logs ---------------------------------------------------------------
     def add_log(

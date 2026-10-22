@@ -1,196 +1,126 @@
 {% extends "base.html" %}
 {% block title %}{{ '编辑用户' if mode == 'edit' else '添加用户' }} · 晚安成电自动打卡{% endblock %}
-{% block content %}
 
+{% block content %}
 <section class="page-head">
   <div>
-    <h1>{{ '编辑用户' if mode == 'edit' else '添加用户' }}</h1>
-    <p class="muted">保存后调度器会为今天生成一个随机打卡时间；已成功的记录不会重复提交。</p>
+    <h1>{{ '编辑 ' ~ user.name if mode == 'edit' else '添加用户' }}</h1>
+    <p class="sub">{{ '修改账号、宿舍楼或打卡窗口' if mode == 'edit' else '填五项即可，坐标按楼栋自动匹配' }}</p>
   </div>
-  <div class="head-actions">
-    <a class="btn btn-ghost" href="/">返回仪表盘</a>
+  <div class="page-actions">
+    <a class="btn btn-sm btn-ghost" href="/">返回仪表盘</a>
   </div>
 </section>
 
 {% if errors %}
 <div class="alert alert-error">
-  <strong>请修正以下问题：</strong>
   <ul class="error-list">
     {% for error in errors %}<li>{{ error }}</li>{% endfor %}
   </ul>
 </div>
 {% endif %}
 
-<form method="post" action="{{ action }}" class="form-card" autocomplete="off">
+<form method="post" action="{{ action }}" class="form" autocomplete="off">
   <input type="hidden" name="_csrf" value="{{ csrf }}">
 
-  <section class="form-section">
-    <div class="section-head">
-      <h2>账号信息</h2>
-      <p class="muted tiny">用于登录学校统一身份认证（idas.uestc.edu.cn）。密码会加密后保存在数据卷中。</p>
+  <section class="panel">
+    <header class="panel-head"><h2>账号</h2></header>
+    <div class="form-grid">
+      <label class="field">
+        <span class="field-label">姓名</span>
+        <input type="text" name="name" value="{{ user.name }}" maxlength="64" required placeholder="张三">
+      </label>
+      <label class="field">
+        <span class="field-label">学号</span>
+        <input type="text" name="student_id" value="{{ user.student_id }}" maxlength="32" required placeholder="2023190505021" class="mono">
+      </label>
+      <label class="field">
+        <span class="field-label">统一身份认证密码{% if mode == 'edit' and user.has_password %}<em class="hint-inline">已保存，留空不修改</em>{% endif %}</span>
+        <input type="password" name="password" value="" maxlength="128" {{ 'required' if mode == 'new' else '' }} placeholder="统一身份认证密码" autocomplete="new-password">
+      </label>
+      <label class="field">
+        <span class="field-label">浏览器指纹<em class="hint-inline">32 位十六进制，可留空</em></span>
+        <input type="text" name="fingerprint" value="{{ user.fingerprint }}" maxlength="32" placeholder="32 位十六进制" class="mono">
+      </label>
     </div>
-    <div class="field-grid">
+  </section>
+
+  <section class="panel">
+    <header class="panel-head">
+      <h2>宿舍楼</h2>
+      <span class="muted small">坐标按楼栋基准自动生成，附加 ≤25 米随机扰动</span>
+    </header>
+    <div class="form-grid">
       <label class="field">
-        <span>姓名</span>
-        <input name="name" value="{{ user.name or '' }}" required maxlength="64" placeholder="张三">
-      </label>
-      <label class="field">
-        <span>学号</span>
-        <input name="student_id" value="{{ user.student_id or '' }}" required maxlength="32"
-               pattern="[A-Za-z0-9]{4,32}" placeholder="2020xxxxxxxx" autocomplete="username">
-      </label>
-      <label class="field span-2">
-        <span>统一身份认证密码</span>
-        <input type="password" name="password" maxlength="128" autocomplete="new-password"
-               placeholder="{{ '留空表示不修改' if mode == 'edit' else '与统一身份认证密码相同' }}"
-               {% if mode == 'new' %}required{% endif %}>
-        {% if mode == 'edit' %}<span class="hint">只有填写新密码时才会更新；修改密码后旧会话会被清除。</span>{% endif %}
-      </label>
-      <label class="field span-2">
-        <span>浏览器指纹 <em class="optional">可选，强烈建议</em></span>
-        <input name="fingerprint" value="{{ user.fingerprint or '' }}" maxlength="32"
-               pattern="[0-9A-Fa-f]{32}" placeholder="32 位十六进制，例如 A1B2C3D4E5F60718293A4B5C6D7E8F90">
-        <span class="hint">
-          学校用它与账号绑定“可信浏览器”，填对后登录不再要求手机二次验证。获取方法：在电脑浏览器登录一次
-          <code>idas.uestc.edu.cn</code>，打开开发者工具 → Application/存储 → Cookies → 找到
-          <code>MULTIFACTOR_BROWSER_FINGERPRINT</code>，复制 32 位值即可。留空时，若学校要求二次验证，自动打卡会明确报错。
+        <span class="field-label">楼栋</span>
+        <input type="text" name="dorm_building" value="{{ user.dorm_building }}" list="building-options" maxlength="100" required placeholder="本科13栋">
+        <datalist id="building-options">
+          {% for building in buildings %}
+          <option value="{{ building.name }}"></option>
+          {% endfor %}
+        </datalist>
+        <span class="field-hint">
+          {% if buildings %}
+          已登记：{% for building in buildings %}{{ building.name }}{{ '、' if not loop.last }}{% endfor %}
+          {% else %}
+          还没有楼栋坐标，先到<a href="/settings">设置 → 宿舍楼坐标</a>添加。
+          {% endif %}
         </span>
       </label>
-    </div>
-  </section>
-
-  <section class="form-section">
-    <div class="section-head">
-      <h2>宿舍位置</h2>
-      <p class="muted tiny">坐标决定系统判定的距离。请填写宿舍所在位置的 GCJ-02 坐标，越准确越好。</p>
-    </div>
-    <div class="field-grid">
-      <label class="field">
-        <span>宿舍楼</span>
-        <input name="dorm_building" value="{{ user.dorm_building or '' }}" maxlength="100" placeholder="例如：学知苑 5 栋">
-      </label>
-      <label class="field">
-        <span>房间号</span>
-        <input name="dorm_room" value="{{ user.dorm_room or '' }}" maxlength="50" placeholder="例如：512">
-      </label>
-      <label class="field span-2">
-        <span>地址描述（可选）</span>
-        <input name="address" value="{{ user.address or '' }}" maxlength="200" placeholder="例如：四川省成都市郫都区西源大道 2006 号">
-      </label>
-      <label class="field">
-        <span>纬度 latitude</span>
-        <input name="latitude" type="number" step="0.000001" min="-90" max="90" required
-               value="{{ user.latitude if user.latitude is not none else '' }}" placeholder="30.754980">
-      </label>
-      <label class="field">
-        <span>经度 longitude</span>
-        <input name="longitude" type="number" step="0.000001" min="-180" max="180" required
-               value="{{ user.longitude if user.longitude is not none else '' }}" placeholder="103.933883">
-      </label>
-    </div>
-
-    {% if mode == 'edit' %}
-    <div class="location-picker">
-      <div class="location-actions">
-        <button type="button" class="btn btn-sm" id="fetch-locations">从学校打卡点中选择</button>
-        <span id="location-status" class="muted tiny">会复用已保存的会话；必要时消耗一次登录。</span>
+      {% if mode == 'edit' %}
+      <div class="field">
+        <span class="field-label">当前坐标</span>
+        <div class="readonly mono">{{ '%.6f, %.6f'|format(user.latitude, user.longitude) }}</div>
+        <label class="check">
+          <input type="checkbox" name="rematch" value="1">
+          <span>重新匹配坐标（应用扰动）</span>
+        </label>
       </div>
-      <select id="location-select" class="hidden" aria-label="学校打卡点"></select>
+      {% endif %}
     </div>
-    {% endif %}
   </section>
 
-  <section class="form-section">
-    <div class="section-head">
-      <h2>打卡计划</h2>
-      <p class="muted tiny">默认跟随全局时段 21:30–23:00。每位用户可在该时段内独立设置更窄的窗口。</p>
-    </div>
-    <div class="field-grid">
+  {% if mode == 'edit' %}
+  <section class="panel">
+    <header class="panel-head"><h2>打卡</h2></header>
+    <div class="form-grid">
       <label class="field">
-        <span>窗口开始</span>
-        <input type="time" name="window_start" value="{{ user.window_start or '21:30' }}" step="60" required>
+        <span class="field-label">开始时间</span>
+        <input type="time" name="window_start" value="{{ user.window_start }}" required class="mono">
       </label>
       <label class="field">
-        <span>窗口结束</span>
-        <input type="time" name="window_end" value="{{ user.window_end or '23:00' }}" step="60" required>
+        <span class="field-label">结束时间</span>
+        <input type="time" name="window_end" value="{{ user.window_end }}" required class="mono">
       </label>
-      <label class="field span-2">
-        <span>通知 Webhook（可选）</span>
-        <input name="notify_url" value="{{ user.notify_url or '' }}" maxlength="500"
-               placeholder="https://sctapi.ftqq.com/xxx.send 或自定义 JSON 接口">
-        <span class="hint">成功、失败或需要人工处理时推送。留空则使用全局 <code>NOTIFY_WEBHOOK</code>（若已配置）。</span>
+      <label class="field wide">
+        <span class="field-label">通知 Webhook<em class="hint-inline">可选</em></span>
+        <input type="url" name="notify_url" value="{{ user.notify_url }}" maxlength="500" placeholder="https://…">
       </label>
-      <label class="field span-2">
-        <span>备注（可选）</span>
-        <textarea name="notes" rows="2" maxlength="500" placeholder="例如：周末回家，暂停打卡">{{ user.notes or '' }}</textarea>
+      <label class="field wide">
+        <span class="field-label">备注<em class="hint-inline">可选</em></span>
+        <input type="text" name="notes" value="{{ user.notes }}" maxlength="500" placeholder="例如：测试账号">
+      </label>
+      <label class="check field wide">
+        <input type="checkbox" name="enabled" value="1" {{ 'checked' if user.enabled }}>
+        <span>启用自动打卡</span>
       </label>
     </div>
-    <label class="switch">
-      <input type="checkbox" name="enabled" value="1" {% if user.enabled %}checked{% endif %}>
-      <span>启用自动打卡</span>
-    </label>
   </section>
+  {% endif %}
 
   <div class="form-actions">
-    <button type="submit" class="btn btn-primary">{{ '保存修改' if mode == 'edit' else '添加用户' }}</button>
+    <button type="submit" class="btn btn-primary">{{ '保存' if mode == 'edit' else '添加并排期' }}</button>
     <a class="btn btn-ghost" href="/">取消</a>
     {% if mode == 'edit' %}
-    <span class="muted tiny">学号：<span class="mono">{{ user.student_id }}</span></span>
+    <span class="spacer"></span>
+    <button type="submit" form="delete-form" class="btn btn-sm btn-danger">删除用户</button>
     {% endif %}
   </div>
 </form>
 
-{% endblock %}
-{% block scripts %}
 {% if mode == 'edit' %}
-<script>
-(function () {
-  var btn = document.getElementById('fetch-locations');
-  if (!btn) return;
-  var status = document.getElementById('location-status');
-  var select = document.getElementById('location-select');
-
-  btn.addEventListener('click', async function () {
-    btn.disabled = true;
-    status.textContent = '正在登录并读取打卡点…';
-    try {
-      var res = await fetch('/users/{{ user.id }}/locations', {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': '{{ csrf }}' }
-      });
-      var data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || '读取失败');
-      var list = data.locations || [];
-      select.innerHTML = '<option value="">选择打卡点…</option>';
-      list.forEach(function (loc, i) {
-        var opt = document.createElement('option');
-        opt.value = String(i);
-        opt.textContent = loc.location_name + (loc.address ? ' · ' + loc.address : '') +
-          ' · ' + loc.radius_meter + 'm';
-        select.appendChild(opt);
-      });
-      select.dataset.locations = JSON.stringify(list);
-      select.classList.remove('hidden');
-      status.textContent = '已读取 ' + list.length + ' 个打卡点，选择后自动填入坐标。';
-    } catch (e) {
-      status.textContent = '失败：' + e.message;
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  select.addEventListener('change', function () {
-    if (select.value === '') return;
-    var list = JSON.parse(select.dataset.locations || '[]');
-    var loc = list[Number(select.value)];
-    if (!loc) return;
-    document.querySelector('[name=latitude]').value = Number(loc.latitude).toFixed(6);
-    document.querySelector('[name=longitude]').value = Number(loc.longitude).toFixed(6);
-    document.querySelector('[name=dorm_building]').value = loc.location_name || '';
-    document.querySelector('[name=address]').value = loc.address || '';
-    status.textContent = '已填入“' + loc.location_name + '”，保存后生效。';
-  });
-})();
-</script>
+<form id="delete-form" method="post" action="/users/{{ user.id }}/delete" onsubmit="return confirm('删除 {{ user.name }} 及其全部计划？');">
+  <input type="hidden" name="_csrf" value="{{ csrf }}">
+</form>
 {% endif %}
 {% endblock %}

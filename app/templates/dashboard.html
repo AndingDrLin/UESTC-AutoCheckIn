@@ -1,86 +1,73 @@
 {% extends "base.html" %}
 {% block title %}仪表盘 · 晚安成电自动打卡{% endblock %}
-{% block content %}
 
+{% block content %}
 <section class="page-head">
   <div>
-    <h1>今日打卡</h1>
-    <p class="muted">{{ today_label }} · 服务器时间 <span class="mono">{{ now_text }}</span> · 平台时段 {{ platform_window }}</p>
+    <h1>今晚的打卡</h1>
+    <p class="sub">{{ today_label }} · <span class="mono" id="clock">{{ now_text }}</span> · 平台开放 {{ platform_window }}</p>
   </div>
-  <div class="head-actions">
-    {% if platform_open %}
-      <span class="pill ok">平台开放中</span>
-    {% else %}
-      <span class="pill muted">平台已关闭</span>
-    {% endif %}
-    <form method="post" action="/plans/regenerate" class="inline-form"
-          onsubmit="return confirm('重新生成今天的待执行计划？已成功的记录不会受影响。')">
+  <div class="page-actions">
+    <span class="chip {{ 'chip-ok' if platform_open else 'chip-muted' }}">{{ '平台已开放' if platform_open else '平台未开放' }}</span>
+    <span class="chip {{ 'chip-ok' if scheduler_status.alive else 'chip-muted' }}">调度 {{ '运行中' if scheduler_status.alive else '已停止' }}</span>
+    <form method="post" action="/plans/regenerate" class="inline-form">
       <input type="hidden" name="_csrf" value="{{ csrf }}">
-      <button class="btn btn-sm" type="submit">重新随机</button>
+      <button type="submit" class="btn btn-sm btn-ghost" title="清除今日待执行计划并重新随机排期">重新排期</button>
     </form>
   </div>
 </section>
 
 {% if default_password %}
-<div class="alert alert-warn">
-  <strong>安全提醒：</strong>当前管理密码仍是默认值。请在 <code>.env</code> 中设置强密码后执行
-  <code>docker compose up -d</code> 重启。
-</div>
+<div class="alert alert-warn">管理员密码仍是默认值（admin / admin），请到 <a href="/settings">设置</a> 修改。</div>
 {% endif %}
-{% if not scheduler_status.alive %}
-<div class="alert alert-error">
-  <strong>调度器未运行。</strong>自动签到不会执行。请检查 <code>SCHEDULER_ENABLED</code> 与容器日志。
-</div>
-{% endif %}
+
+<section class="metrics">
+  <div class="metric"><span class="metric-label">用户</span><span class="metric-value">{{ stats.total }}</span><span class="metric-hint">{{ stats.enabled }} 个启用</span></div>
+  <div class="metric"><span class="metric-label">今日成功</span><span class="metric-value ok">{{ stats.success }}</span><span class="metric-hint">占比 {{ (stats.success * 100 // stats.total) if stats.total else 0 }}%</span></div>
+  <div class="metric"><span class="metric-label">待执行</span><span class="metric-value warn">{{ stats.pending }}</span><span class="metric-hint">{{ '下一场 ' ~ next_in if next_in else '无排期' }}</span></div>
+  <div class="metric"><span class="metric-label">失败</span><span class="metric-value {{ 'bad' if stats.failed else '' }}">{{ stats.failed }}</span><span class="metric-hint">含错过</span></div>
+  <div class="metric wide">
+    <span class="metric-label">近 7 天 <em>{{ history_rate ~ '%' if history_rate is not none else '—' }}</em></span>
+    <div class="spark">
+      {% for day in history %}
+      <div class="spark-col{{ ' spark-empty' if not day.total }}" title="{{ day.date }} {{ day.weekday }} · {{ day.success }}/{{ day.total }}">
+        <div class="spark-bar"><i style="height: {{ day.rate if day.rate is not none else 0 }}%"></i></div>
+        <span class="spark-day">{{ day.weekday }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
 
 {% if next_row %}
-<section class="next-card">
-  <div class="next-icon">⏰</div>
+<section class="next">
   <div class="next-main">
-    <div class="next-label">下一个自动签到</div>
-    <div class="next-time mono">{{ next_row.plan.planned_time }}</div>
-    <div class="muted">{{ next_row.user.name }} · {{ next_row.user.dorm_building or '未填写宿舍' }}{% if next_row.user.dorm_room %} {{ next_row.user.dorm_room }}{% endif %}</div>
+    <span class="next-label">下一场</span>
+    <strong>{{ next_row.user.name }}</strong>
+    <span class="mono">{{ next_row.planned_time }}</span>
   </div>
-  <div class="next-side muted tiny">
-    今日计划由调度器随机生成；<br>重启容器不会改变已经生成的时间。
+  <div class="next-meta">
+    <span>{{ next_row.user.dorm_building or '未设置楼栋' }}</span>
+    <span class="muted">倒计时 {{ next_in }}</span>
   </div>
 </section>
 {% endif %}
 
-<section class="stats">
-  <div class="stat-card">
-    <div class="stat-label">用户</div>
-    <div class="stat-value">{{ stats.total }}</div>
-    <div class="stat-sub">{{ stats.enabled }} 个启用</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">今日成功</div>
-    <div class="stat-value ok">{{ stats.success }}</div>
-    <div class="stat-sub">已确认 CHECKED_IN</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">待执行 / 进行中</div>
-    <div class="stat-value warn">{{ stats.pending }}</div>
-    <div class="stat-sub">窗口内会自动重试</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">失败 / 错过</div>
-    <div class="stat-value {{ 'bad' if stats.failed else 'muted' }}">{{ stats.failed }}</div>
-    <div class="stat-sub">需要人工关注</div>
-  </div>
-</section>
-
-<section class="card">
-  <div class="card-head">
+<section class="panel">
+  <header class="panel-head">
     <h2>用户与今日计划</h2>
-    <span class="muted tiny">共 {{ stats.total }} 人</span>
-  </div>
+    <span class="muted small">窗口 {{ settings.window_start }}–{{ settings.window_end }} · 120 秒自动刷新</span>
+  </header>
+
+  {% if rows %}
   <div class="table-wrap">
-    <table class="table">
+    <table class="table dense">
       <thead>
         <tr>
           <th>用户</th>
-          <th>宿舍 / 坐标</th>
+          <th>宿舍楼</th>
+          <th class="mono">坐标</th>
+          <th>窗口</th>
           <th>今日计划</th>
           <th>状态</th>
           <th>最近结果</th>
@@ -89,86 +76,50 @@
       </thead>
       <tbody>
         {% for row in rows %}
-        <tr>
+        <tr class="{{ 'row-disabled' if not row.user.enabled else '' }}">
           <td>
-            <div class="user-name">
-              {{ row.user.name }}
-              {% if not row.user.enabled %}<span class="badge muted">已停用</span>{% endif %}
-            </div>
-            <div class="muted mono tiny">{{ row.user.student_id }}</div>
-            <div class="muted tiny">
-              指纹：{{ '已配置' if row.user.fingerprint else '未配置（可能触发二次验证）' }}
-            </div>
+            <div class="cell-name">{{ row.user.name }}</div>
+            <div class="cell-sub mono">{{ row.user.student_id }}</div>
           </td>
+          <td>{{ row.user.dorm_building or '—' }}</td>
+          <td class="mono cell-sub">{{ '%.5f, %.5f'|format(row.user.latitude, row.user.longitude) }}</td>
+          <td class="mono cell-sub">{{ row.user.window_start }}–{{ row.user.window_end }}</td>
+          <td class="mono">{{ row.planned_time }}</td>
           <td>
-            <div>{{ row.user.dorm_building or '—' }}{% if row.user.dorm_room %} {{ row.user.dorm_room }}{% endif %}</div>
-            <div class="muted tiny">{{ row.user.address or '未填写地址' }}</div>
-            <div class="muted tiny mono">{{ '%.6f'|format(row.user.latitude) }}, {{ '%.6f'|format(row.user.longitude) }}</div>
+            <span class="tag tag-{{ row.status_class }}">{{ row.status_text }}</span>
+            {% if row.session_state == 'invalid' %}<span class="tag tag-bad" title="登录会话已失效，下次会重新登录">会话失效</span>{% endif %}
           </td>
-          <td>
-            <div class="mono planned">{{ row.planned_time }}</div>
-            <div class="muted tiny">{{ row.user.window_start }}–{{ row.user.window_end }}</div>
-          </td>
-          <td>
-            <span class="badge {{ row.status_class }}">{{ row.status_text }}</span>
-            {% if row.last_error %}
-            <div class="error-text tiny clamp" title="{{ row.last_error }}">{{ row.last_error }}</div>
-            {% endif %}
-          </td>
-          <td class="result-cell">
-            {% if row.result and row.result.get('message') %}
-              <div class="tiny">{{ row.result.get('message') }}</div>
-              {% set detail = row.result.get('detail') or {} %}
-              {% if detail.get('checkin_time') %}
-              <div class="muted tiny">打卡时间 {{ detail.get('checkin_time') }}</div>
-              {% endif %}
-              {% if detail.get('distance_meter') is not none %}
-              <div class="muted tiny">距打卡点 {{ '%.1f'|format(detail.get('distance_meter')) }} 米</div>
-              {% endif %}
-            {% else %}
-              <span class="muted">—</span>
-            {% endif %}
-            {% if row.session_info %}
-              <div class="muted tiny">
-                会话：{{ '已失效' if row.session_info.invalid else '已缓存' }}
-                {% if row.session_info.last_login_epoch %} · 最近登录 {{ row.session_info.last_login_epoch|localtime }}{% endif %}
-              </div>
-            {% else %}
-              <div class="muted tiny">会话：尚未登录</div>
-            {% endif %}
+          <td class="cell-result">
+            {% if row.checkin_time %}<span class="mono">{{ row.checkin_time }}</span>{% endif %}
+            {% if row.distance is not none %}<span class="cell-sub">{{ '%.1f'|format(row.distance) }} m</span>{% endif %}
+            {% if row.last_error %}<div class="cell-error" title="{{ row.last_error }}">{{ row.last_error }}</div>{% elif not row.checkin_time and not row.distance %}<span class="muted">—</span>{% endif %}
           </td>
           <td class="right">
-            <div class="actions">
-              <form method="post" action="/users/{{ row.user.id }}/checkin" class="inline-form"
-                    onsubmit="return confirm('立即为 {{ row.user.name }} 提交打卡？每天只有一次机会，请确认已在正确位置。')">
+            <div class="btn-row">
+              {% if row.can_checkin %}
+              <form method="post" action="/users/{{ row.user.id }}/checkin" class="inline-form">
                 <input type="hidden" name="_csrf" value="{{ csrf }}">
-                <button class="btn btn-sm btn-primary" type="submit"
-                        {% if not row.can_checkin %}disabled title="仅在平台时段 {{ platform_window }} 可用"{% endif %}>立即打卡</button>
+                <button type="submit" class="btn btn-xs btn-primary">立即</button>
               </form>
-              <form method="post" action="/users/{{ row.user.id }}/test" class="inline-form">
-                <input type="hidden" name="_csrf" value="{{ csrf }}">
-                <button class="btn btn-sm" type="submit" title="登录并读取今日状态与打卡点，不会提交打卡">测试链路</button>
-              </form>
-              <a class="btn btn-sm btn-ghost" href="/users/{{ row.user.id }}/edit">编辑</a>
+              {% endif %}
               <form method="post" action="/users/{{ row.user.id }}/toggle" class="inline-form">
                 <input type="hidden" name="_csrf" value="{{ csrf }}">
-                <button class="btn btn-sm btn-ghost" type="submit">{{ '停用' if row.user.enabled else '启用' }}</button>
+                <button type="submit" class="btn btn-xs btn-ghost" title="{{ '停用' if row.user.enabled else '启用' }}">{{ '停用' if row.user.enabled else '启用' }}</button>
               </form>
-              <form method="post" action="/users/{{ row.user.id }}/delete" class="inline-form"
-                    onsubmit="return confirm('删除 {{ row.user.name }} 及其全部计划？此操作不可恢复。')">
-                <input type="hidden" name="_csrf" value="{{ csrf }}">
-                <button class="btn btn-sm btn-danger-ghost" type="submit">删除</button>
-              </form>
-            </div>
-          </td>
-        </tr>
-        {% else %}
-        <tr>
-          <td colspan="6">
-            <div class="empty">
-              <div class="empty-icon">🌙</div>
-              <p>还没有用户。</p>
-              <a class="btn btn-primary" href="/users/new">添加第一个用户</a>
+              <a class="btn btn-xs btn-ghost" href="/users/{{ row.user.id }}/edit">编辑</a>
+              <details class="more">
+                <summary class="btn btn-xs btn-ghost">更多</summary>
+                <div class="more-menu">
+                  <form method="post" action="/users/{{ row.user.id }}/test" class="inline-form">
+                    <input type="hidden" name="_csrf" value="{{ csrf }}">
+                    <button type="submit" class="btn btn-xs btn-ghost">链路测试</button>
+                  </form>
+                  <form method="post" action="/users/{{ row.user.id }}/delete" class="inline-form" onsubmit="return confirm('删除 {{ row.user.name }} 及其全部计划？');">
+                    <input type="hidden" name="_csrf" value="{{ csrf }}">
+                    <button type="submit" class="btn btn-xs btn-danger">删除</button>
+                  </form>
+                </div>
+              </details>
             </div>
           </td>
         </tr>
@@ -176,38 +127,30 @@
       </tbody>
     </table>
   </div>
+  {% else %}
+  <div class="empty">
+    <p>还没有用户。</p>
+    <p class="muted small">添加时只需姓名、学号、统一身份认证密码、指纹和宿舍楼，坐标按楼栋自动匹配。</p>
+    <a class="btn btn-primary" href="/users/new">添加第一个用户</a>
+  </div>
+  {% endif %}
 </section>
 
-<section class="grid-2">
-  <div class="card">
-    <div class="card-head"><h2>它是怎么工作的</h2></div>
-    <ol class="steps">
-      <li><strong>每天生成随机计划。</strong>调度器在 {{ settings.window_start }}–{{ settings.window_end }} 内为每位用户随机选一个时间，并写入数据库。</li>
-      <li><strong>到点自动执行。</strong>容器内的后台线程在计划时间登录统一身份认证、预热门户、读取今日状态并提交打卡，全程不需要手机。</li>
-      <li><strong>失败自动重试。</strong>网络抖动、会话失效等临时问题会在窗口内按退避间隔重试，最多 {{ settings.max_attempts }} 次。</li>
-      <li><strong>结果可核对。</strong>提交后再次读取今日记录，状态为 <code>CHECKED_IN</code> 才算最终成功；页面会显示打卡时间与距离。</li>
-    </ol>
-  </div>
-  <div class="card">
-    <div class="card-head"><h2>首次使用检查清单</h2></div>
-    <ul class="checklist">
-      <li>已在 <code>.env</code> 设置强 <code>ADMIN_PASSWORD</code> 与固定 <code>APP_SECRET</code>。</li>
-      <li>已填写真实宿舍坐标（可在编辑页点击“获取打卡点”从学校列表选择）。</li>
-      <li>已填写浏览器指纹；否则登录可能要求二次验证，自动打卡会失败。</li>
-      <li>已点击“测试链路”，确认会话、微应用和打卡点均正常。</li>
-      <li>容器时区为 <code>Asia/Shanghai</code>，且每天 21:30 前保持运行。</li>
-    </ul>
-  </div>
-</section>
-
-{% endblock %}
-{% block scripts %}
 <script>
-  // Keep the dashboard fresh without fighting with an open form.
-  window.setTimeout(function () {
-    if (!document.hidden && !document.activeElement.matches('input, textarea, select')) {
-      window.location.reload();
-    }
-  }, 90000);
+  (function () {
+    var start = {{ now_text | tojson }};
+    var clock = document.getElementById('clock');
+    if (!clock || !start) return;
+    var parts = start.split(':').map(Number);
+    var base = new Date();
+    base.setHours(parts[0] || 0, parts[1] || 0, parts[2] || 0, 0);
+    var t0 = Date.now();
+    setInterval(function () {
+      var now = new Date(base.getTime() + (Date.now() - t0));
+      var p = function (n) { return String(n).padStart(2, '0'); };
+      clock.textContent = p(now.getHours()) + ':' + p(now.getMinutes()) + ':' + p(now.getSeconds());
+    }, 1000);
+    setTimeout(function () { window.location.reload(); }, 120000);
+  })();
 </script>
 {% endblock %}

@@ -3,7 +3,7 @@
 Examples::
 
     python -m app.cli user add --name 张三 --student-id 2020000000000 \
-        --lat 30.75498 --lng 103.933883 --building "学知苑 5 栋" --room 512
+        --building 本科13栋 --fingerprint AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     python -m app.cli user list
     python -m app.cli plan show
     python -m app.cli run --student-id 2020000000000 --dry-run
@@ -25,6 +25,7 @@ from .notifier import Notifier
 from .scheduler import CheckinScheduler
 from .security import SecretBox, SecretMismatch
 from .uestc.cas import fetch_login_page
+from .uestc.dorms import DEFAULT_ADDRESS, jitter, normalize_building
 from .uestc.errors import UestcError
 from .uestc.http import UestcHttp
 from .uestc.service import CheckinService
@@ -90,12 +91,25 @@ def _fingerprint(value: str | None) -> str:
     return text
 
 
+def _coords_for_building(db: Database, building: str) -> tuple[str, float, float]:
+    """按楼栋基准坐标生成一个带扰动的位置。"""
+    name = normalize_building(building)
+    if not name:
+        raise ValueError("楼栋名应形如「本科13栋」")
+    row = db.get_building(name)
+    if not row:
+        raise ValueError(
+            f"楼栋「{name}」还没有基准坐标：可在 Web 设置页添加，或直接用 --lat/--lng 指定"
+        )
+    latitude, longitude = jitter(float(row["latitude"]), float(row["longitude"]))
+    return name, latitude, longitude
+
+
 def _print_user(user: dict, db: Database) -> None:
     session = db.get_session(int(user["id"]))
     print(f"用户 #{user['id']}  {user['name']}  ({user['student_id']})")
     print(f"  状态      : {'启用' if user['enabled'] else '停用'}")
-    print(f"  宿舍      : {user['dorm_building'] or '—'} {user['dorm_room'] or ''}".rstrip())
-    print(f"  地址      : {user['address'] or '—'}")
+    print(f"  宿舍楼    : {user['dorm_building'] or '—'}")
     print(f"  坐标      : {user['latitude']:.6f}, {user['longitude']:.6f}")
     print(f"  打卡窗口  : {user['window_start']}–{user['window_end']}")
     print(f"  指纹      : {user['fingerprint'] or '未配置'}")
@@ -119,9 +133,18 @@ def cmd_user_add(args: argparse.Namespace) -> int:
     cfg, db, box, _, scheduler = _context()
     try:
         window_start, window_end = _parse_window(cfg, args.window_start, args.window_end)
-        _check_coords(args.lat, args.lng)
         fingerprint = _fingerprint(args.fingerprint)
         password = _prompt_password(args.password)
+        if args.lat is not None or args.lng is not None:
+            if args.lat is None or args.lng is None:
+                raise ValueError("--lat 与 --lng 需要同时提供")
+            _check_coords(args.lat, args.lng)
+            building = normalize_building(args.building or "") or (args.building or "").strip()
+            latitude, longitude = round(args.lat, 6), round(args.lng, 6)
+        else:
+            if not args.building:
+                raise ValueError("请用 --building 指定宿舍楼（或用 --lat/--lng 指定坐标）")
+            building, latitude, longitude = _coords_for_building(db, args.building)
     except ValueError as exc:
         return _die(str(exc))
     if len(args.student_id) < 4 or not args.student_id.isalnum():
@@ -134,11 +157,10 @@ def cmd_user_add(args: argparse.Namespace) -> int:
             student_id=args.student_id.strip(),
             password_enc=box.encrypt(password),
             fingerprint=fingerprint,
-            dorm_building=(args.building or "").strip(),
-            dorm_room=(args.room or "").strip(),
-            address=(args.address or "").strip(),
-            latitude=round(args.lat, 6),
-            longitude=round(args.lng, 6),
+            dorm_building=building,
+            address=DEFAULT_ADDRESS,
+            latitude=latitude,
+            longitude=longitude,
             window_start=window_start,
             window_end=window_end,
             notify_url=(args.notify_url or "").strip(),
@@ -151,6 +173,7 @@ def cmd_user_add(args: argparse.Namespace) -> int:
     if not args.disabled:
         scheduler.ensure_plans()
     print(f"已添加用户 #{user_id} {args.name}（{args.student_id}）")
+    print(f"宿舍楼：{building}，坐标：{latitude:.6f}, {longitude:.6f}")
     print(f"打卡窗口：{window_start}–{window_end}；今天将由调度器随机安排。")
     return 0
 
@@ -166,12 +189,11 @@ def cmd_user_update(args: argparse.Namespace) -> int:
             fields["name"] = args.name.strip()
         if args.fingerprint is not None:
             fields["fingerprint"] = _fingerprint(args.fingerprint)
-        if args.building is not None:
-            fields["dorm_building"] = args.building.strip()
-        if args.room is not None:
-            fields["dorm_room"] = args.room.strip()
-        if args.address is not None:
-            fields["address"] = args.address.strip()
+        if args.building is not None and args.lat is None and args.lng is None:
+            name, latitude, longitude = _coords_for_building(db, args.building)
+            fields["dorm_building"] = name
+            fields["latitude"] = latitude
+            fields["longitude"] = longitude
         if args.notify_url is not None:
             fields["notify_url"] = args.notify_url.strip()
         if args.notes is not None:
@@ -180,6 +202,8 @@ def cmd_user_update(args: argparse.Namespace) -> int:
             _check_coords(args.lat, args.lng)
             fields["latitude"] = round(args.lat, 6)
             fields["longitude"] = round(args.lng, 6)
+        elif (args.lat is None) != (args.lng is None):
+            raise ValueError("--lat 与 --lng 需要同时提供")
         if args.window_start is not None or args.window_end is not None:
             start, end = _parse_window(cfg, args.window_start, args.window_end)
             fields["window_start"] = start
@@ -221,7 +245,7 @@ def cmd_user_list(args: argparse.Namespace) -> int:
     print(f"{'ID':<4} {'姓名':<12} {'学号':<16} {'状态':<5} {'窗口':<12} {'宿舍'}")
     print("-" * 88)
     for user in users:
-        dorm = f"{user['dorm_building']} {user['dorm_room']}".strip() or "—"
+        dorm = user['dorm_building'] or "—"
         print(
             f"{user['id']:<4} {user['name']:<12} {user['student_id']:<16} "
             f"{'启用' if user['enabled'] else '停用':<5} "
@@ -438,8 +462,8 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--building", default=None)
     add.add_argument("--room", default=None)
     add.add_argument("--address", default=None)
-    add.add_argument("--lat", type=float, required=True)
-    add.add_argument("--lng", type=float, required=True)
+    add.add_argument("--lat", type=float, default=None, help="覆盖楼栋坐标（可选）")
+    add.add_argument("--lng", type=float, default=None, help="覆盖楼栋坐标（可选）")
     add.add_argument("--window-start", default=None)
     add.add_argument("--window-end", default=None)
     add.add_argument("--notify-url", default=None)
@@ -453,8 +477,6 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--password", default=None)
     update.add_argument("--fingerprint")
     update.add_argument("--building")
-    update.add_argument("--room")
-    update.add_argument("--address")
     update.add_argument("--lat", type=float)
     update.add_argument("--lng", type=float)
     update.add_argument("--window-start")

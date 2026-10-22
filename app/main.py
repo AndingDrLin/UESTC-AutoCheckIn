@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -37,6 +37,11 @@ from .security import (
     check_admin_password,
     new_session,
     verify_session,
+)
+from .uestc.dorms import (
+    DEFAULT_ADDRESS,
+    jitter as jitter_coords,
+    normalize_building,
 )
 from .uestc.errors import ServiceError
 from .uestc.service import CheckinService, Outcome
@@ -117,7 +122,12 @@ def _parse_float(value: str) -> float | None:
     return number
 
 
-def validate_user_fields(raw: dict[str, str], *, require_password: bool) -> tuple[dict, str, list[str]]:
+def validate_user_fields(
+    raw: dict[str, str],
+    *,
+    require_password: bool,
+    require_coords: bool = True,
+) -> tuple[dict, str, list[str]]:
     """Validate an HTML form.  Returns (typed fields, plain password, errors)."""
     errors: list[str] = []
 
@@ -143,12 +153,15 @@ def validate_user_fields(raw: dict[str, str], *, require_password: bool) -> tupl
 
     latitude = _parse_float(raw.get("latitude", ""))
     longitude = _parse_float(raw.get("longitude", ""))
-    if latitude is None or not (-90 <= latitude <= 90):
-        errors.append("纬度应为 -90 到 90 之间的数字")
-    if longitude is None or not (-180 <= longitude <= 180):
-        errors.append("经度应为 -180 到 180 之间的数字")
-    if latitude is not None and longitude is not None and abs(latitude) < 1e-9 and abs(longitude) < 1e-9:
-        errors.append("请填写真实的宿舍坐标（0,0 不是有效位置）")
+    if require_coords:
+        if latitude is None or not (-90 <= latitude <= 90):
+            errors.append("纬度应为 -90 到 90 之间的数字")
+        if longitude is None or not (-180 <= longitude <= 180):
+            errors.append("经度应为 -180 到 180 之间的数字")
+        if latitude is not None and longitude is not None and abs(latitude) < 1e-9 and abs(longitude) < 1e-9:
+            errors.append("请填写真实的宿舍坐标（0,0 不是有效位置）")
+    elif latitude is None or longitude is None:
+        latitude, longitude = 0.0, 0.0
 
     window_start = None
     window_end = None
@@ -191,6 +204,52 @@ def validate_user_fields(raw: dict[str, str], *, require_password: bool) -> tupl
         "enabled": 1,
     }
     return fields, password, []
+
+
+def _resolve_building(
+    database: Database, value: str
+) -> tuple[str, tuple[float, float] | None, str]:
+    """把表单里的楼栋名解析成基准坐标。
+
+    返回 (规范化楼栋名, 基准坐标或 None, 错误信息)。
+    """
+    name = normalize_building(value)
+    if not name:
+        return "", None, "请选择宿舍楼（例如：本科13栋）"
+    building = database.get_building(name)
+    if building is None:
+        return name, None, f"宿舍楼「{name}」还没有坐标，请先在「设置 → 宿舍楼坐标」中添加"
+    return name, (float(building["latitude"]), float(building["longitude"])), ""
+
+
+def _match_building_coords(
+    database: Database,
+    value: str,
+    *,
+    existing: dict | None = None,
+    rematch: bool = False,
+) -> tuple[str, tuple[float, float] | None, str]:
+    """按楼栋匹配坐标；楼栋未变且未要求重算时，沿用已保存的坐标。"""
+    name, base, error = _resolve_building(database, value)
+    previous = normalize_building((existing or {}).get("dorm_building") or "")
+    same = bool(name) and name == previous
+    if same and existing is not None and not rematch:
+        return name, (float(existing["latitude"]), float(existing["longitude"])), ""
+    if base is None and same and existing is not None:
+        # 存量用户保留了未登记的楼栋名：沿用原坐标，避免把用户卡在编辑页。
+        return name, (float(existing["latitude"]), float(existing["longitude"])), ""
+    if base is None:
+        return name, None, error
+    return name, jitter_coords(*base), ""
+
+
+def _format_seconds(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if hours:
+        return f"{hours} 小时 {minutes} 分"
+    return f"{minutes} 分"
 
 
 def _safe_session_info(row: dict | None) -> dict | None:
@@ -242,12 +301,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         auth = current_session(request)
         if not auth:
             raise LoginRequired()
-        return auth
-
-    def require_api_admin(request: Request) -> dict:
-        auth = current_session(request)
-        if not auth:
-            raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
         return auth
 
     def render(
@@ -366,18 +419,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     result = json.loads(plan["result"])
                 except (TypeError, ValueError):
                     result = {}
+            detail = result.get("detail") or {}
+            session_info = _safe_session_info(db.get_session(int(user["id"])))
             status = plan["status"] if plan else "none"
             rows.append(
                 {
                     "user": public_user(user),
                     "plan": plan,
                     "result": result,
+                    "detail": detail,
                     "status": status,
                     "status_text": STATUS_TEXT.get(status, status),
                     "status_class": STATUS_CLASS.get(status, "muted"),
                     "planned_time": plan["planned_time"] if plan else "—",
                     "last_error": (plan or {}).get("last_error", ""),
-                    "session_info": _safe_session_info(db.get_session(int(user["id"]))),
+                    "checkin_time": detail.get("checkin_time") or "",
+                    "distance": detail.get("distance_meter"),
+                    "session_info": session_info,
+                    "session_state": (
+                        "invalid"
+                        if session_info and session_info["invalid"]
+                        else ("ok" if session_info else "none")
+                    ),
                     "can_checkin": bool(user["enabled"]) and platform_is_open(now),
                 }
             )
@@ -399,6 +462,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             key=lambda row: int(row["plan"]["planned_epoch"]),
             default=None,
         )
+        history = db.recent_stats(7, today=now.date())
+        planned = sum(day["total"] for day in history)
+        checked = sum(day["success"] for day in history)
         return render(
             request,
             "dashboard.html",
@@ -408,6 +474,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows=rows,
             stats=stats,
             next_row=next_row,
+            next_in=(
+                _format_seconds(int(next_row["plan"]["planned_epoch"]) - int(now.timestamp()))
+                if next_row
+                else ""
+            ),
+            history=history,
+            history_rate=round(checked * 100 / planned) if planned else None,
             today_label=f"{now.strftime('%Y-%m-%d')} {WEEKDAYS[now.weekday()]}",
             now_text=now.strftime("%H:%M:%S"),
             platform_open=platform_is_open(now),
@@ -423,8 +496,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "student_id": "",
             "fingerprint": "",
             "dorm_building": "",
-            "dorm_room": "",
-            "address": "",
+            "address": DEFAULT_ADDRESS,
             "latitude": "",
             "longitude": "",
             "window_start": cfg.window_start.strftime("%H:%M"),
@@ -443,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             auth=auth,
             mode="new",
             user=_new_user_defaults(),
+            buildings=db.list_buildings(),
             errors=[],
             action="/users/new",
         )
@@ -457,37 +530,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         password: str = Form(""),
         fingerprint: str = Form(""),
         dorm_building: str = Form(""),
-        dorm_room: str = Form(""),
-        address: str = Form(""),
-        latitude: str = Form(""),
-        longitude: str = Form(""),
-        window_start: str = Form("21:30"),
-        window_end: str = Form("23:00"),
-        notify_url: str = Form(""),
-        notes: str = Form(""),
-        enabled: str = Form("0"),
     ):
         check_csrf(auth, csrf)
+        building, coords, building_error = _match_building_coords(db, dorm_building)
         raw = {
             "name": name,
             "student_id": student_id,
             "password": password,
             "fingerprint": fingerprint,
-            "dorm_building": dorm_building,
-            "dorm_room": dorm_room,
-            "address": address,
-            "latitude": latitude,
-            "longitude": longitude,
-            "window_start": window_start,
-            "window_end": window_end,
-            "notify_url": notify_url,
-            "notes": notes,
+            "dorm_building": building,
+            "address": DEFAULT_ADDRESS,
+            "latitude": f"{coords[0]:.6f}" if coords else "",
+            "longitude": f"{coords[1]:.6f}" if coords else "",
+            "window_start": cfg.window_start.strftime("%H:%M"),
+            "window_end": cfg.window_end.strftime("%H:%M"),
+            "notify_url": "",
+            "notes": "",
         }
         fields, plain_password, errors = validate_user_fields(
-            raw, require_password=True
+            raw, require_password=True, require_coords=coords is not None
         )
-        fields["enabled"] = 1 if enabled in ("1", "on", "true", "yes") else 0
+        if building_error and coords is None:
+            errors.insert(0, building_error)
         if not errors:
+            fields["enabled"] = 1
             fields["password_enc"] = box.encrypt(plain_password)
             try:
                 user_id = db.create_user(**fields)
@@ -502,13 +568,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 scheduler.wake()
                 return redirect_with("/", f"已添加 {fields['name']}，今晚将自动安排打卡")
-        form_user = {"id": None, **raw, "enabled": 1 if enabled in ("1", "on", "true", "yes") else 0}
+        form_user = {"id": None, **raw, "enabled": 1, "has_password": False}
         return render(
             request,
             "user_form.html",
             auth=auth,
             mode="new",
             user=form_user,
+            buildings=db.list_buildings(),
             errors=errors,
             action="/users/new",
             status_code=400,
@@ -525,6 +592,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             auth=auth,
             mode="edit",
             user=public_user(user),
+            buildings=db.list_buildings(),
             errors=[],
             action=f"/users/{user_id}/edit",
         )
@@ -540,40 +608,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         password: str = Form(""),
         fingerprint: str = Form(""),
         dorm_building: str = Form(""),
-        dorm_room: str = Form(""),
-        address: str = Form(""),
-        latitude: str = Form(""),
-        longitude: str = Form(""),
         window_start: str = Form("21:30"),
         window_end: str = Form("23:00"),
         notify_url: str = Form(""),
         notes: str = Form(""),
         enabled: str = Form("0"),
+        rematch: str = Form("0"),
     ):
         check_csrf(auth, csrf)
         existing = db.get_user(user_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="用户不存在")
+        building, coords, building_error = _match_building_coords(
+            db,
+            dorm_building,
+            existing=existing,
+            rematch=rematch in ("1", "on", "true", "yes"),
+        )
         raw = {
             "name": name,
             "student_id": student_id,
             "password": password,
             "fingerprint": fingerprint,
-            "dorm_building": dorm_building,
-            "dorm_room": dorm_room,
-            "address": address,
-            "latitude": latitude,
-            "longitude": longitude,
+            "dorm_building": building,
+            "address": DEFAULT_ADDRESS,
+            "latitude": f"{coords[0]:.6f}" if coords else "",
+            "longitude": f"{coords[1]:.6f}" if coords else "",
             "window_start": window_start,
             "window_end": window_end,
             "notify_url": notify_url,
             "notes": notes,
         }
         fields, plain_password, errors = validate_user_fields(
-            raw, require_password=False
+            raw, require_password=False, require_coords=coords is not None
         )
-        fields["enabled"] = 1 if enabled in ("1", "on", "true", "yes") else 0
+        if building_error and coords is None:
+            errors.insert(0, building_error)
         if not errors:
+            fields["enabled"] = 1 if enabled in ("1", "on", "true", "yes") else 0
             if plain_password:
                 fields["password_enc"] = box.encrypt(plain_password)
             try:
@@ -606,6 +678,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             auth=auth,
             mode="edit",
             user=form_user,
+            buildings=db.list_buildings(),
             errors=errors,
             action=f"/users/{user_id}/edit",
             status_code=400,
@@ -721,63 +794,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             locations=(outcome.detail or {}).get("locations", []),
         )
 
-    @app.post("/users/{user_id}/locations")
-    async def user_locations(
-        user_id: int,
-        request: Request,
-        auth: dict = Depends(require_api_admin),
-    ):
-        check_csrf(auth, request.headers.get("X-CSRF-Token", ""))
-        user = db.get_user(user_id)
-        if user is None:
-            raise HTTPException(status_code=404, detail="用户不存在")
-        try:
-            locations = await run_in_threadpool(service.fetch_locations, user)
-            return {"ok": True, "locations": locations}
-        except ServiceError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        except Exception:
-            logger.exception("fetch locations failed")
-            return JSONResponse(
-                {"ok": False, "error": "拉取打卡点失败，请查看日志"},
-                status_code=500,
-            )
-
-    @app.post("/users/{user_id}/apply-location")
-    def apply_location(
-        user_id: int,
+    # -- dorm buildings -----------------------------------------------------
+    @app.post("/buildings")
+    def building_create(
         auth: dict = Depends(require_admin),
         csrf: str = Form("", alias="_csrf"),
+        name: str = Form(""),
         latitude: str = Form(""),
         longitude: str = Form(""),
-        location_name: str = Form(""),
-        address: str = Form(""),
+        source: str = Form(""),
     ):
         check_csrf(auth, csrf)
-        user = db.get_user(user_id)
-        if user is None:
-            raise HTTPException(status_code=404, detail="用户不存在")
+        building = normalize_building(name)
         lat = _parse_float(latitude)
         lng = _parse_float(longitude)
-        if lat is None or lng is None or not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
-            return redirect_with(f"/users/{user_id}/edit", "坐标无效", "error")
-        db.update_user(
-            user_id,
-            latitude=round(lat, 6),
-            longitude=round(lng, 6),
-            dorm_building=location_name[:100] or user.get("dorm_building", ""),
-            address=address[:200] or user.get("address", ""),
-        )
-        today = datetime.now(cfg.tz).date().isoformat()
-        db.delete_pending_plan(user_id, today)
-        scheduler.wake()
-        db.add_log(
-            f"更新打卡点：{location_name or address or '自定义坐标'}",
-            user_id=user_id,
-            user_name=user["name"],
-            event="user.location",
-        )
-        return redirect_with(f"/users/{user_id}/edit", "已更新打卡点坐标")
+        if not building:
+            return redirect_with("/settings", "请输入楼栋名称", "error")
+        if (
+            lat is None
+            or lng is None
+            or not (-90 <= lat <= 90)
+            or not (-180 <= lng <= 180)
+            or (abs(lat) < 1e-9 and abs(lng) < 1e-9)
+        ):
+            return redirect_with("/settings", "楼栋坐标无效", "error")
+        db.upsert_building(building, round(lat, 6), round(lng, 6), source[:100])
+        db.add_log(f"保存楼栋坐标 {building}", event="building.save")
+        return redirect_with("/settings", f"已保存 {building} 的基准坐标")
+
+    @app.post("/buildings/delete")
+    def building_delete(
+        auth: dict = Depends(require_admin),
+        csrf: str = Form("", alias="_csrf"),
+        name: str = Form(""),
+    ):
+        check_csrf(auth, csrf)
+        building = normalize_building(name)
+        if not building:
+            return redirect_with("/settings", "楼栋名称无效", "error")
+        db.delete_building(building)
+        db.add_log(f"删除楼栋坐标 {building}", event="building.delete")
+        return redirect_with("/settings", f"已删除 {building}")
 
     # -- logs ---------------------------------------------------------------
     @app.get("/logs", response_class=HTMLResponse)
@@ -831,7 +888,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             f"{PLATFORM_WINDOW_START.strftime('%H:%M')}–"
             f"{PLATFORM_WINDOW_END.strftime('%H:%M')}"
         )
-        return render(request, "settings.html", auth=auth, info=info)
+        return render(
+            request,
+            "settings.html",
+            auth=auth,
+            info=info,
+            buildings=db.list_buildings(),
+        )
 
     @app.post("/plans/regenerate")
     def plans_regenerate(

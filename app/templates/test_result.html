@@ -73,7 +73,7 @@
 <section class="card">
   <div class="card-head">
     <h2>学校打卡点</h2>
-    <span class="muted tiny">点击“用此位置”会把坐标保存为该用户的打卡位置</span>
+    <span class="muted tiny">「校准」会用该打卡点坐标覆盖用户的宿舍楼基准坐标</span>
   </div>
   <div class="table-wrap">
     <table class="table">
@@ -91,15 +91,17 @@
           <td class="mono tiny">{{ '%.6f'|format(loc.latitude) }}, {{ '%.6f'|format(loc.longitude) }}</td>
           <td class="mono tiny">{{ loc.radius_meter }} m</td>
           <td class="right">
-            <form method="post" action="/users/{{ user.id }}/apply-location" class="inline-form"
-                  onsubmit="return confirm('把“{{ loc.location_name }}”设为 {{ user.name }} 的打卡位置？')">
+            {% if user.dorm_building %}
+            <form method="post" action="/buildings" class="inline-form"
+                  onsubmit="return confirm('用「{{ loc.location_name }}」的坐标覆盖 {{ user.dorm_building }} 的基准坐标？')">
               <input type="hidden" name="_csrf" value="{{ csrf }}">
+              <input type="hidden" name="name" value="{{ user.dorm_building }}">
               <input type="hidden" name="latitude" value="{{ loc.latitude }}">
               <input type="hidden" name="longitude" value="{{ loc.longitude }}">
-              <input type="hidden" name="location_name" value="{{ loc.location_name }}">
-              <input type="hidden" name="address" value="{{ loc.address }}">
-              <button class="btn btn-sm btn-primary" type="submit">用此位置</button>
+              <input type="hidden" name="source" value="打卡点校准：{{ loc.location_name }}">
+              <button class="btn btn-sm btn-ghost" type="submit">校准</button>
             </form>
+            {% else %}—{% endif %}
           </td>
         </tr>
         {% endfor %}
