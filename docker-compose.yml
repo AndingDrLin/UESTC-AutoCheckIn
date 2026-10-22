@@ -29,7 +29,7 @@ services:
       NOTIFY_WEBHOOK: ${NOTIFY_WEBHOOK:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8000}:8000"
+      - "0.0.0.0:8000:8000"
     volumes:
       - checkin-data:/data
     stop_grace_period: 30s
