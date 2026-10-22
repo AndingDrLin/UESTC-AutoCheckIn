@@ -136,6 +136,15 @@
   {% endif %}
 </section>
 
+<details class="card collapsible buildings-panel">
+  <summary>
+    <h2>宿舍楼坐标</h2>
+    <span class="muted tiny">{{ buildings|length }} 个楼栋 · 用户坐标 = 基准 + ≤25 米扰动</span>
+  </summary>
+  {% set next_path = '/' %}
+  {% include "_buildings.html" %}
+</details>
+
 <script>
   (function () {
     var start = {{ now_text | tojson }};

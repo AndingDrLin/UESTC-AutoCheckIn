@@ -330,6 +330,8 @@ input::placeholder, textarea::placeholder { color: #a9aeaa; }
 
 /* -- 卡片网格 ----------------------------------------------------------- */
 .grid-2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.pad { padding: 12px 14px; }
+.buildings-panel { margin-top: 14px; }
 
 .collapsible > summary {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

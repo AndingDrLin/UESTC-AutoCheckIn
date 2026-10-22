@@ -218,7 +218,7 @@ def _resolve_building(
         return "", None, "请选择宿舍楼（例如：本科13栋）"
     building = database.get_building(name)
     if building is None:
-        return name, None, f"宿舍楼「{name}」还没有坐标，请先在「设置 → 宿舍楼坐标」中添加"
+        return name, None, f"宿舍楼「{name}」还没有坐标，请先在看板底部的「宿舍楼坐标」里添加"
     return name, (float(building["latitude"]), float(building["longitude"])), ""
 
 
@@ -486,6 +486,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             platform_open=platform_is_open(now),
             scheduler_status=scheduler.status(),
             default_password=cfg.is_default_password,
+            buildings=db.list_buildings(),
         )
 
     # -- users --------------------------------------------------------------
@@ -795,6 +796,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # -- dorm buildings -----------------------------------------------------
+    def _after_building(value: str) -> str:
+        """楼栋表单提交后回到来源页（只允许站内两处）。"""
+        return "/" if value == "/" else "/settings"
+
     @app.post("/buildings")
     def building_create(
         auth: dict = Depends(require_admin),
@@ -803,13 +808,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         latitude: str = Form(""),
         longitude: str = Form(""),
         source: str = Form(""),
+        redirect_to: str = Form("/settings", alias="next"),
     ):
         check_csrf(auth, csrf)
+        back = _after_building(redirect_to)
         building = normalize_building(name)
         lat = _parse_float(latitude)
         lng = _parse_float(longitude)
         if not building:
-            return redirect_with("/settings", "请输入楼栋名称", "error")
+            return redirect_with(back, "请输入楼栋名称", "error")
         if (
             lat is None
             or lng is None
@@ -817,24 +824,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or not (-180 <= lng <= 180)
             or (abs(lat) < 1e-9 and abs(lng) < 1e-9)
         ):
-            return redirect_with("/settings", "楼栋坐标无效", "error")
+            return redirect_with(back, "楼栋坐标无效", "error")
         db.upsert_building(building, round(lat, 6), round(lng, 6), source[:100])
         db.add_log(f"保存楼栋坐标 {building}", event="building.save")
-        return redirect_with("/settings", f"已保存 {building} 的基准坐标")
+        return redirect_with(back, f"已保存 {building} 的基准坐标")
 
     @app.post("/buildings/delete")
     def building_delete(
         auth: dict = Depends(require_admin),
         csrf: str = Form("", alias="_csrf"),
         name: str = Form(""),
+        redirect_to: str = Form("/settings", alias="next"),
     ):
         check_csrf(auth, csrf)
+        back = _after_building(redirect_to)
         building = normalize_building(name)
         if not building:
-            return redirect_with("/settings", "楼栋名称无效", "error")
+            return redirect_with(back, "楼栋名称无效", "error")
         db.delete_building(building)
         db.add_log(f"删除楼栋坐标 {building}", event="building.delete")
-        return redirect_with("/settings", f"已删除 {building}")
+        return redirect_with(back, f"已删除 {building}")
 
     # -- logs ---------------------------------------------------------------
     @app.get("/logs", response_class=HTMLResponse)

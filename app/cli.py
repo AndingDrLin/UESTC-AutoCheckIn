@@ -99,7 +99,7 @@ def _coords_for_building(db: Database, building: str) -> tuple[str, float, float
     row = db.get_building(name)
     if not row:
         raise ValueError(
-            f"楼栋「{name}」还没有基准坐标：可在 Web 设置页添加，或直接用 --lat/--lng 指定"
+            f"楼栋「{name}」还没有基准坐标：可在 Web 看板/设置页添加，或直接用 --lat/--lng 指定"
         )
     latitude, longitude = jitter(float(row["latitude"]), float(row["longitude"]))
     return name, latitude, longitude

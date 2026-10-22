@@ -46,39 +46,8 @@
       <h2>宿舍楼坐标</h2>
       <span class="muted tiny">用户坐标 = 楼栋基准 + ≤25 米随机扰动</span>
     </div>
-    {% if buildings %}
-    <table class="table compact dense">
-      <thead><tr><th>楼栋</th><th class="mono">纬度</th><th class="mono">经度</th><th>来源</th><th class="right">操作</th></tr></thead>
-      <tbody>
-        {% for building in buildings %}
-        <tr>
-          <td>{{ building.name }}</td>
-          <td class="mono">{{ '%.5f'|format(building.latitude) }}</td>
-          <td class="mono">{{ '%.5f'|format(building.longitude) }}</td>
-          <td class="muted tiny">{{ building.source or '—' }}</td>
-          <td class="right">
-            <form method="post" action="/buildings/delete" class="inline-form" onsubmit="return confirm('删除 {{ building.name }} 的基准坐标？已匹配的用户坐标不受影响。');">
-              <input type="hidden" name="_csrf" value="{{ csrf }}">
-              <input type="hidden" name="name" value="{{ building.name }}">
-              <button type="submit" class="btn btn-xs btn-ghost">删除</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="muted small">还没有楼栋坐标，添加后用户表单才能选择楼栋。</p>
-    {% endif %}
-
-    <form method="post" action="/buildings" class="inline-form building-form">
-      <input type="hidden" name="_csrf" value="{{ csrf }}">
-      <input type="text" name="name" placeholder="本科13栋" maxlength="100" required>
-      <input type="text" name="latitude" placeholder="30.753736" class="mono" required>
-      <input type="text" name="longitude" placeholder="103.934585" class="mono" required>
-      <input type="text" name="source" placeholder="来源（可选）" maxlength="100">
-      <button type="submit" class="btn btn-sm btn-primary">保存</button>
-    </form>
+    {% set next_path = '/settings' %}
+    {% include "_buildings.html" %}
   </div>
 </section>
 
@@ -91,7 +60,7 @@
         <tr><td class="mono">ADMIN_PASSWORD</td><td class="mono">••••••</td><td>管理后台密码，部署前必须修改。</td></tr>
         <tr><td class="mono">APP_SECRET</td><td class="mono">{{ '已设置' if info.get('secret_source') == 'env' else '自动生成（数据卷）' }}</td><td>加密与会话签名密钥；多实例部署必须固定。</td></tr>
         <tr><td class="mono">TZ</td><td class="mono">{{ info.get('tz_name') }}</td><td>容器时区，默认 <code>Asia/Shanghai</code>。</td></tr>
-        <tr><td class="mono">CHECKIN_WINDOW_START</td><td class="mono">{{ info.get('window_start') }}</td><td>随机窗口开始，默认 21:30。</td></tr>
+        <tr><td class="mono">CHECKIN_WINDOW_START</td><td class="mono">{{ info.get('window_start') }}</td><td>随机窗口开始，默认 21:00。</td></tr>
         <tr><td class="mono">CHECKIN_WINDOW_END</td><td class="mono">{{ info.get('window_end') }}</td><td>随机窗口结束，默认 23:00。</td></tr>
         <tr><td class="mono">RETRY_INTERVAL_SEC</td><td class="mono">{{ info.get('retry_interval_sec') }}</td><td>失败重试基准间隔。</td></tr>
         <tr><td class="mono">MAX_ATTEMPTS</td><td class="mono">{{ info.get('max_attempts') }}</td><td>窗口内最大提交尝试次数。</td></tr>

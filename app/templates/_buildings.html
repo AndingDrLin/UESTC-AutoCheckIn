@@ -1,0 +1,38 @@
+{% set back = next_path|default('/settings') %}
+{% if buildings %}
+<div class="table-wrap">
+  <table class="table compact dense">
+    <thead><tr><th>楼栋</th><th class="mono">纬度</th><th class="mono">经度</th><th>来源</th><th class="right">操作</th></tr></thead>
+    <tbody>
+      {% for building in buildings %}
+      <tr>
+        <td>{{ building.name }}</td>
+        <td class="mono">{{ '%.5f'|format(building.latitude) }}</td>
+        <td class="mono">{{ '%.5f'|format(building.longitude) }}</td>
+        <td class="muted tiny">{{ building.source or '—' }}</td>
+        <td class="right">
+          <form method="post" action="/buildings/delete" class="inline-form" onsubmit="return confirm('删除 {{ building.name }} 的基准坐标？已匹配的用户坐标不受影响。');">
+            <input type="hidden" name="_csrf" value="{{ csrf }}">
+            <input type="hidden" name="next" value="{{ back }}">
+            <input type="hidden" name="name" value="{{ building.name }}">
+            <button type="submit" class="btn btn-xs btn-ghost">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="muted small pad">还没有楼栋坐标，添加后用户表单才能选择楼栋。</p>
+{% endif %}
+
+<form method="post" action="/buildings" class="inline-form building-form">
+  <input type="hidden" name="_csrf" value="{{ csrf }}">
+  <input type="hidden" name="next" value="{{ back }}">
+  <input type="text" name="name" placeholder="本科13栋" maxlength="100" required>
+  <input type="text" name="latitude" placeholder="30.753736" class="mono" required>
+  <input type="text" name="longitude" placeholder="103.934585" class="mono" required>
+  <input type="text" name="source" placeholder="来源（可选）" maxlength="100">
+  <button type="submit" class="btn btn-sm btn-primary">保存</button>
+</form>

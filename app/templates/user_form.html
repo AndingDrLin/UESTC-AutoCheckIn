@@ -63,7 +63,7 @@
           {% if buildings %}
           已登记：{% for building in buildings %}{{ building.name }}{{ '、' if not loop.last }}{% endfor %}
           {% else %}
-          还没有楼栋坐标，先到<a href="/settings">设置 → 宿舍楼坐标</a>添加。
+          还没有楼栋坐标，先到<a href="/">看板底部</a>或<a href="/settings">设置页</a>的「宿舍楼坐标」添加。
           {% endif %}
         </span>
       </label>

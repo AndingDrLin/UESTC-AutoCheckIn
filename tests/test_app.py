@@ -244,6 +244,34 @@ def test_building_crud_and_user_matching(app):
             follow_redirects=False,
         )
         assert response.status_code == 303
+
+
+def test_dashboard_can_add_building(app):
+    with TestClient(app) as client:
+        login(client)
+        page = client.get("/")
+        assert "宿舍楼坐标" in page.text
+        assert 'action="/buildings"' in page.text
+
+        # 看板上的楼栋表单提交后回到看板，而不是设置页。
+        response = client.post(
+            "/buildings",
+            data={
+                "_csrf": csrf_from(page.text),
+                "name": "本科 9 栋",
+                "latitude": "30.755000",
+                "longitude": "103.934000",
+                "source": "看板新增",
+                "next": "/",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/?")
+        assert app.state.db.get_building("本科9栋") is not None
+
+        follow = client.get(response.headers["location"])
+        assert "本科9栋" in follow.text
         assert app.state.db.get_building("本科7栋") is None
 
 
